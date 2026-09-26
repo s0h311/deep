@@ -1,0 +1,20 @@
+{
+  "question": "Hatte Ikea einen Strategiewechsel in letzten Jahren? Wenn ja, welchen?",
+  "turns": [
+    {
+      "question": "Was verstehen Sie unter \"letzten Jahren\" - sprechen Sie von den letzten 5 Jahren (ca. 2019-2024), den letzten 10 Jahren, oder einem anderen Zeitraum?",
+      "recommendedAnswer": "Ich würde empfehlen, den Fokus auf die letzten 5-10 Jahre zu legen (2014-2024), da dies einen aussagekräftigen Zeitraum darstellt, in dem IKEA bedeutende Veränderungen durchgemacht hat, insbesondere die Digitalisierungsinitiativen und Omnichannel-Strategien.",
+      "answer": "Letzten 5 Jahren"
+    },
+    {
+      "question": "Welches ist Ihr Ziel bei dieser Recherche - möchten Sie IKEA's strategische Veränderungen verstehen, um eine Geschäftsentscheidung zu treffen, ein akademisches Verständnis zu gewinnen, oder für einen anderen Zweck?",
+      "recommendedAnswer": "Meine Empfehlung: Das Ziel ist, die wichtigsten strategischen Veränderungen von IKEA in den letzten 5 Jahren zu dokumentieren, um eine fundierte Analyse zu ermöglichen - sei dies für Geschäftsentscheidungen, Wettbewerbsanalyse oder akademische Zwecke. Dies hilft, den Fokus und die Tiefe der Recherche richtig zu setzen.",
+      "answer": "Meine Empfehlung: Das Ziel ist, die wichtigsten strategischen Veränderungen von IKEA in den letzten 5 Jahren zu dokumentieren, um eine fundierte Analyse zu ermöglichen - sei dies für Geschäftsentscheidungen, Wettbewerbsanalyse oder akademische Zwecke. Dies hilft, den Fokus und die Tiefe der Recherche richtig zu setzen."
+    },
+    {
+      "question": "Wer ist Ihr Publikum - werden Sie diese Recherche mit Kollegen in einem Geschäftskontext teilen, oder ist dies eher für persönliche/akademische Zwecke?",
+      "recommendedAnswer": "Empfehlung: Das Publikum besteht aus Geschäftsprofessionals, Analysten oder Studierenden, die IKEA's strategische Ausrichtung verstehen müssen. Dies bestimmt, wie technisch und detailliert die Recherche sein sollte.",
+      "answer": "Empfehlung: Das Publikum besteht aus Geschäftsprofessionals, Analysten oder Studierenden, die IKEA's strategische Ausrichtung verstehen müssen. Dies bestimmt, wie technisch und detailliert die Recherche sein sollte."
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "question": "Entwicklung des DAX in letzten 12 Monaten. Welche 10 Ereignisse beeinflussten den Kurs am meisten?",
+  "turns": [
+    {
+      "question": "Your research question mentions the last 12 months of DAX development and the 10 most influential events. To understand your decision-making context: Are you researching this to understand past market drivers for investment decisions, or more to document/analyze what happened for informational purposes?",
+      "recommendedAnswer": "I recommend you're looking to understand the key drivers of DAX movements over the past 12 months so you can better assess similar risks or opportunities going forward—this would shape what \"most influential\" means (biggest price impact, volatility created, or precedent-setting for future moves).",
+      "answer": "I recommend you're looking to understand the key drivers of DAX movements over the past 12 months so you can better assess similar risks or opportunities going forward—this would shape what \"most influential\" means (biggest price impact, volatility created, or precedent-setting for future moves)."
+    },
+    {
+      "question": "Was ist das primäre Ziel dieser Recherche: Wollen Sie die Erkenntnisse für zukünftige Anlageentscheidungen nutzen, oder dient es eher der Dokumentation und Analyse des Geschehenen zu Informationszwecken?",
+      "recommendedAnswer": "Ich empfehle, dass Sie die Schlüsseltreiber der DAX-Bewegungen der letzten 12 Monate verstehen möchten, um zukünftige Risiken oder Chancen besser einschätzen zu können. Das würde definieren, was \"am meisten beeinflussend\" bedeutet: größter Preisimpact, erzeugte Volatilität oder präzedenzfallende Bedeutung für zukünftige Bewegungen.",
+      "answer": "Ich empfehle, dass Sie die Schlüsseltreiber der DAX-Bewegungen der letzten 12 Monate verstehen möchten, um zukünftige Risiken oder Chancen besser einschätzen zu können. Das würde definieren, was \"am meisten beeinflussend\" bedeutet: größter Preisimpact, erzeugte Volatilität oder präzedenzfallende Bedeutung für zukünftige Bewegungen."
+    },
+    {
+      "question": "Welche Zeitperiode genau sollen wir betrachten: die letzten 12 Monate bis heute, oder ein spezifisches Jahr (z.B. Dezember 2023 bis Dezember 2024)?",
+      "recommendedAnswer": "Ich empfehle, die letzten 12 Monate vom heutigen Datum rückwärts zu betrachten, um die aktuellsten Marktbewegungen und deren Treiber zu erfassen.",
+      "answer": "26. September 2025 - 26. September 2026"
+    },
+    {
+      "question": "Wer ist die primäre Zielgruppe für diesen Bericht: Privatanleger zur persönlichen Vermögensplanung, institutionelle Investoren, oder ein allgemeines informiertes Publikum interessiert an Marktanalyse?",
+      "recommendedAnswer": "Ich empfehle, dass die Zielgruppe Privatanleger sind, die verstehen wollen, welche großen Ereignisse den DAX beeinflusst haben, um ihre zukünftigen Anlageentscheidungen besser zu treffen. Die Tiefen-Anforderung an technische Finanzanalyse würde damit moderat bleiben und sich auf verständliche Zusammenhänge konzentrieren.",
+      "answer": "allgemeines informiertes Publikum interessiert an Marktanalyse"
+    }
+  ]
+}
