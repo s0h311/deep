@@ -1,16 +1,17 @@
 import { Component, inject, signal } from '@angular/core'
+import { GrillingThread } from '../../components/grilling-thread/grilling-thread'
 import { Stepper } from '../../components/stepper/stepper'
 import { ResearchApi } from '../../services/research-api'
 
 @Component({
-  imports: [Stepper],
+  imports: [GrillingThread, Stepper],
   templateUrl: 'home.page.html',
 })
 export class HomePage {
   protected readonly research = inject(ResearchApi)
   protected readonly message = signal('')
 
-  protected send(event: SubmitEvent): void {
+  protected sendTyped(event: SubmitEvent): void {
     event.preventDefault()
     const message = this.message().trim()
 
@@ -19,6 +20,10 @@ export class HomePage {
     }
 
     this.message.set('')
+    this.send(message)
+  }
+
+  protected send(message: string): void {
     void this.research.send(message)
   }
 }

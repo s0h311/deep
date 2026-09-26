@@ -1,6 +1,7 @@
 import { isPlatformBrowser } from '@angular/common'
 import { httpResource } from '@angular/common/http'
-import { computed, effect, inject, Injectable, PLATFORM_ID, signal } from '@angular/core'
+import { computed, effect, inject, Injectable, PLATFORM_ID, signal, untracked } from '@angular/core'
+import { GrillingTranscript } from '../models/grilling-transcript'
 import { ResearchState } from '../models/research-state'
 
 /** How often a page that isn't reading a stream re-fetches a Running Research's state. */
@@ -17,6 +18,11 @@ type ResearchEvent =
 export class ResearchApi {
   private readonly researchState = httpResource<ResearchState>(() => '/api/research')
   private readonly artifactNames = httpResource<string[]>(() => '/api/research/artifacts')
+  /** Whether the Research is in the Grilling Step, so the Grilling Transcript holds its chat thread. */
+  private readonly grilling = computed(() => inGrilling(this.state()))
+  private readonly transcript = httpResource<GrillingTranscript>(() =>
+    this.grilling() ? '/api/research/artifacts/grilling_transcript.json' : undefined,
+  )
   private readonly streaming = signal(false)
   private readonly browser = isPlatformBrowser(inject(PLATFORM_ID))
 
@@ -24,6 +30,8 @@ export class ResearchApi {
     this.researchState.hasValue() ? this.researchState.value() : { status: 'none' },
   )
   readonly artifacts = computed(() => (this.artifactNames.hasValue() ? this.artifactNames.value() : []))
+  /** The Grilling interview while the Research is in the Grilling Step. */
+  readonly grillingTranscript = computed(() => (this.transcript.hasValue() ? this.transcript.value() : undefined))
   /** Whether the Research would reject a message now. */
   readonly busy = computed(() => this.streaming() || this.state().status === 'running')
 
@@ -38,10 +46,25 @@ export class ResearchApi {
       const poll = setTimeout(() => this.researchState.reload(), POLL_INTERVAL)
       onCleanup(() => clearTimeout(poll))
     })
+
+    // Awaiting Answer means the Research has just saved a new question to the Grilling Transcript, whether this page's
+    // stream, polling or a 409 reported it. No-op while the Grilling Transcript is still loading for the first time.
+    effect(() => {
+      if (this.state().status === 'awaiting_answer') {
+        untracked(() => this.transcript.reload())
+      }
+    })
   }
 
   /** Sends a message to the Research and follows the Steps it runs until its stream ends. */
   async send(message: string): Promise<void> {
+    const transcript = this.grillingTranscript()
+
+    if (this.state().status === 'awaiting_answer' && transcript) {
+      // The answer shows in the thread now; the Grilling Transcript has it only once the Research saves it.
+      this.transcript.set(answered(transcript, message))
+    }
+
     this.streaming.set(true)
 
     try {
@@ -82,6 +105,19 @@ export class ResearchApi {
 
     this.researchState.set(stateAt(event))
   }
+}
+
+/** The Grilling Transcript with its last question answered, if that question was still unanswered. */
+function answered(transcript: GrillingTranscript, answer: string): GrillingTranscript {
+  const last = transcript.turns.at(-1)
+
+  return last && last.answer === undefined
+    ? { ...transcript, turns: [...transcript.turns.slice(0, -1), { ...last, answer }] }
+    : transcript
+}
+
+function inGrilling(state: ResearchState): boolean {
+  return state.status === 'awaiting_answer' || ('step' in state && state.step === 'grilling')
 }
 
 /** The state a streamed Step puts the Research in. */

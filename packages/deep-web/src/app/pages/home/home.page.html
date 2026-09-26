@@ -13,10 +13,17 @@
   <section class="flex min-h-64 flex-col gap-4 rounded-lg border border-line bg-elevated p-6">
     @if (research.state().status === 'none') {
     <h1 class="text-xl font-semibold">What do you want to research?</h1>
+    } @else if (research.grillingTranscript(); as transcript) {
+    <app-grilling-thread
+      [transcript]="transcript"
+      [answerable]="research.state().status === 'awaiting_answer'"
+      [disabled]="research.busy()"
+      (recommendationUsed)="send($event)"
+    />
     }
     <form
       class="mt-auto flex items-end gap-2"
-      (submit)="send($event)"
+      (submit)="sendTyped($event)"
     >
       <textarea
         name="message"

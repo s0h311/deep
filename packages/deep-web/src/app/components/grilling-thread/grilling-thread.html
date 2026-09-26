@@ -1,0 +1,21 @@
+<ol class="flex flex-col gap-3">
+  <li class="max-w-[80%] self-end rounded-lg bg-accent px-3 py-2 text-sm text-white">{{ transcript().question }}</li>
+  @for (turn of transcript().turns; track $index) {
+  <li class="max-w-[80%] self-start rounded-lg border border-line bg-surface px-3 py-2 text-sm">
+    <p><span class="font-semibold text-accent">Q{{ $index + 1 }}</span> {{ turn.question }}</p>
+    <p class="mt-1 text-muted">Recommended answer: {{ turn.recommendedAnswer }}</p>
+    @if (answerable() && $last && turn.answer === undefined) {
+    <button
+      type="button"
+      class="mt-2 rounded-md border border-accent px-3 py-1 text-xs font-medium text-accent hover:bg-accent-soft disabled:opacity-50"
+      [disabled]="disabled()"
+      (click)="recommendationUsed.emit(turn.recommendedAnswer)"
+    >
+      Use recommendation
+    </button>
+    }
+  </li>
+  @if (turn.answer !== undefined) {
+  <li class="max-w-[80%] self-end rounded-lg bg-accent px-3 py-2 text-sm text-white">{{ turn.answer }}</li>
+  } }
+</ol>

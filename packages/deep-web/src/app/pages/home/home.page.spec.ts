@@ -1,17 +1,31 @@
 import { provideHttpClient } from '@angular/common/http'
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing'
 import { TestBed } from '@angular/core/testing'
+import { GrillingTranscript } from '../../models/grilling-transcript'
 import { ResearchState } from '../../models/research-state'
 import { stubFailedSend, stubStream } from '../../../testing/fake-stream'
 import { HomePage } from './home.page'
 
-async function renderPage(api: { state?: ResearchState; artifacts?: string[] }) {
+const GRILLING_TRANSCRIPT_URL = '/api/research/artifacts/grilling_transcript.json'
+
+/** A Grilling Transcript whose first question is still unanswered. */
+const FIRST_QUESTION: GrillingTranscript = {
+  question: 'How do heat pumps work?',
+  turns: [{ question: 'Who is the audience?', recommendedAnswer: 'Homeowners considering one.' }],
+}
+
+async function renderPage(api: { state?: ResearchState; artifacts?: string[]; transcript?: GrillingTranscript }) {
   TestBed.configureTestingModule({ providers: [provideHttpClient(), provideHttpClientTesting()] })
   const fixture = TestBed.createComponent(HomePage)
   const http = TestBed.inject(HttpTestingController)
   TestBed.tick()
   http.expectOne({ method: 'GET', url: '/api/research' }).flush(api.state ?? { status: 'none' })
   http.expectOne({ method: 'GET', url: '/api/research/artifacts' }).flush(api.artifacts ?? [])
+  await settle()
+  // During Grilling the page reads the Grilling Transcript to build the chat thread.
+  for (const request of http.match({ method: 'GET', url: GRILLING_TRANSCRIPT_URL })) {
+    request.flush(api.transcript ?? FIRST_QUESTION)
+  }
   await fixture.whenStable()
   http.verify()
   return fixture.nativeElement as HTMLElement
@@ -38,6 +52,25 @@ function send(page: HTMLElement, message: string): void {
   input.value = message
   input.dispatchEvent(new Event('input'))
   button.click()
+}
+
+/** The chat thread's messages, in order, each as its lines of text joined by single spaces. */
+function thread(page: HTMLElement): string[] {
+  return [...page.querySelectorAll('app-grilling-thread li')].map((item) => {
+    const texts: string[] = []
+    const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT)
+
+    while (walker.nextNode()) {
+      texts.push(walker.currentNode.textContent ?? '')
+    }
+
+    return texts.join(' ').replace(/\s+/g, ' ').trim()
+  })
+}
+
+/** The "Use recommendation" button, if the page shows one. */
+function useRecommendation(page: HTMLElement): HTMLButtonElement | undefined {
+  return [...page.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Use recommendation')
 }
 
 /** The stepper's current Step, the one marked aria-current. */
@@ -121,6 +154,104 @@ describe('HomePage', () => {
     })
   })
 
+  describe('Grilling chat', () => {
+    it('shows the question, then each numbered Grilling question with its recommended answer and the answer given', async () => {
+      const page = await renderPage({
+        state: { status: 'awaiting_answer' },
+        transcript: {
+          question: 'How do heat pumps work?',
+          turns: [
+            { question: 'Who is the audience?', recommendedAnswer: 'Homeowners.', answer: 'Installers.' },
+            { question: 'Which climate?', recommendedAnswer: 'Central Europe.' },
+          ],
+        },
+      })
+
+      expect(thread(page)).toEqual([
+        'How do heat pumps work?',
+        'Q1 Who is the audience? Recommended answer: Homeowners.',
+        'Installers.',
+        expect.stringContaining('Q2 Which climate? Recommended answer: Central Europe.'),
+      ])
+    })
+
+    it('sends the recommended answer verbatim with "Use recommendation"', async () => {
+      const page = await renderPage({ state: { status: 'awaiting_answer' }, transcript: FIRST_QUESTION })
+      stubStream()
+
+      useRecommendation(page)?.click()
+
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/research',
+        expect.objectContaining({ method: 'POST', body: JSON.stringify({ message: 'Homeowners considering one.' }) }),
+      )
+    })
+
+    it('sends a typed answer as typed', async () => {
+      const page = await renderPage({ state: { status: 'awaiting_answer' }, transcript: FIRST_QUESTION })
+      stubStream()
+
+      send(page, 'Installers in cold climates')
+
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/research',
+        expect.objectContaining({ method: 'POST', body: JSON.stringify({ message: 'Installers in cold climates' }) }),
+      )
+    })
+
+    it('offers "Use recommendation" only while the Research is Awaiting Answer', async () => {
+      const page = await renderPage({ state: { status: 'interrupted', step: 'grilling' }, transcript: FIRST_QUESTION })
+
+      expect(thread(page)).toContain('Q1 Who is the audience? Recommended answer: Homeowners considering one.')
+      expect(useRecommendation(page)).toBeUndefined()
+    })
+
+    it('disables the answer controls while the answer is being sent', async () => {
+      const page = await renderPage({ state: { status: 'awaiting_answer' }, transcript: FIRST_QUESTION })
+      const stream = stubStream()
+
+      useRecommendation(page)?.click()
+      stream.push({ type: 'step', step: 'grilling' })
+      await settle()
+
+      expect(useRecommendation(page)).toBeUndefined()
+      expect(page.querySelector<HTMLTextAreaElement>('textarea[name="message"]')?.disabled).toBe(true)
+    })
+
+    it('shows the answer right away and the next question once the Research asks it', async () => {
+      const page = await renderPage({ state: { status: 'awaiting_answer' }, transcript: FIRST_QUESTION })
+      const stream = stubStream()
+
+      send(page, 'Installers')
+      stream.push({ type: 'step', step: 'grilling' })
+      await settle()
+
+      expect(thread(page).at(-1)).toBe('Installers')
+
+      stream.push({ type: 'text', text: '❓ **Q2**: Which climate?\n\n➡️ Central Europe.' })
+      stream.push({ type: 'step', step: 'awaiting_answer' })
+      stream.close()
+      await settle()
+      TestBed.inject(HttpTestingController)
+        .expectOne({ method: 'GET', url: GRILLING_TRANSCRIPT_URL })
+        .flush({
+          question: 'How do heat pumps work?',
+          turns: [
+            {
+              question: 'Who is the audience?',
+              recommendedAnswer: 'Homeowners considering one.',
+              answer: 'Installers',
+            },
+            { question: 'Which climate?', recommendedAnswer: 'Central Europe.' },
+          ],
+        })
+      await settle()
+
+      expect(thread(page).at(-1)).toContain('Q2 Which climate? Recommended answer: Central Europe.')
+      expect(useRecommendation(page)?.disabled).toBe(false)
+    })
+  })
+
   it("shows the names of the Research's Artifacts", async () => {
     const page = await renderPage({ artifacts: ['q.gp.md', 'q.sc.json'] })
 
@@ -163,6 +294,29 @@ describe('HomePage', () => {
       await vi.advanceTimersByTimeAsync(10_000)
       TestBed.tick()
       http.expectNone({ method: 'GET', url: '/api/research' })
+    })
+
+    it('shows a Grilling question asked by a send this page did not start', async () => {
+      const page = await renderPage({
+        state: { status: 'running', step: 'grilling' },
+        transcript: { question: 'How do heat pumps work?', turns: [] },
+      })
+      const http = TestBed.inject(HttpTestingController)
+
+      await vi.advanceTimersByTimeAsync(2000)
+      TestBed.tick()
+      http.expectOne({ method: 'GET', url: '/api/research' }).flush({ status: 'awaiting_answer' })
+      await vi.advanceTimersByTimeAsync(0)
+      TestBed.tick()
+      http.expectOne({ method: 'GET', url: GRILLING_TRANSCRIPT_URL }).flush(FIRST_QUESTION)
+      await vi.advanceTimersByTimeAsync(0)
+      TestBed.tick()
+
+      expect(thread(page)).toEqual([
+        'How do heat pumps work?',
+        expect.stringContaining('Q1 Who is the audience? Recommended answer: Homeowners considering one.'),
+      ])
+      expect(useRecommendation(page)).toBeDefined()
     })
   })
 
