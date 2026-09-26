@@ -4,9 +4,12 @@ import { computed, effect, inject, Injectable, PLATFORM_ID, signal, untracked } 
 import { firstValueFrom } from 'rxjs'
 import { GrillingTranscript } from '../models/grilling-transcript'
 import { ResearchState } from '../models/research-state'
+import { SourceCatalogue } from '../models/source-catalogue'
 
 /** How often a page that isn't reading a stream re-fetches a Running Research's state. */
 const POLL_INTERVAL = 2000
+/** The Source Catalogue Artifact's name after the Topic prefix. */
+const SOURCE_CATALOGUE_SUFFIX = '_source_catalogue.json'
 
 /** An event on the stream of `POST /api/research`. */
 type ResearchEvent =
@@ -24,6 +27,22 @@ export class ResearchApi {
   private readonly transcript = httpResource<GrillingTranscript>(() =>
     this.grilling() ? '/api/research/artifacts/grilling_transcript.json' : undefined,
   )
+  private readonly catalogueName = computed(() =>
+    this.artifacts().find((name) => name.endsWith(SOURCE_CATALOGUE_SUFFIX)),
+  )
+  private readonly catalogue = httpResource<SourceCatalogue>(() => {
+    const name = this.catalogueName()
+    return name ? `/api/research/artifacts/${encodeURIComponent(name)}` : undefined
+  })
+  /** Where the loaded Research stands, ignoring any reason, so a poll that finds it unchanged is no change. */
+  private readonly step = computed(() => {
+    if (!this.researchState.hasValue()) {
+      return undefined
+    }
+
+    const state = this.researchState.value()
+    return [state.status, 'step' in state ? state.step : '', 'round' in state ? state.round : ''].join(' ')
+  })
   private readonly streaming = signal(false)
   /** Cancels the stream this page is reading, if any. */
   private stream?: AbortController
@@ -36,6 +55,8 @@ export class ResearchApi {
   readonly artifacts = computed(() => (this.artifactNames.hasValue() ? this.artifactNames.value() : []))
   /** The Grilling interview while the Research is in the Grilling Step. */
   readonly grillingTranscript = computed(() => (this.transcript.hasValue() ? this.transcript.value() : undefined))
+  /** The Source Catalogue's Sources, once its Step has written it. */
+  readonly sources = computed(() => (this.catalogue.hasValue() ? this.catalogue.value().sources : undefined))
   /** Whether the Research would reject a message now. */
   readonly busy = computed(() => this.streaming() || this.state().status === 'running')
 
@@ -57,6 +78,23 @@ export class ResearchApi {
       if (this.state().status === 'awaiting_answer') {
         untracked(() => this.transcript.reload())
       }
+    })
+
+    // A Step writes its Artifacts before the next one starts, so every change of Step may bring new ones. The first
+    // loaded state is skipped, as the Artifact names were read along with it, and so is a reset, which leaves none.
+    let seen: string | undefined
+    effect(() => {
+      const step = this.step()
+
+      if (step === undefined) {
+        return
+      }
+
+      if (seen !== undefined && step !== seen && this.state().status !== 'none') {
+        untracked(() => this.artifactNames.reload())
+      }
+
+      seen = step
     })
   }
 

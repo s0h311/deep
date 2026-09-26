@@ -1,0 +1,20 @@
+<h2 class="text-sm font-medium text-muted">Source Catalogue</h2>
+@if (entries(); as entries) {
+<ul class="mt-2 space-y-1">
+  @for (entry of entries; track entry.source) {
+  <li class="font-mono text-sm">
+    @if (entry.href) {
+    <a
+      class="text-accent hover:underline"
+      target="_blank"
+      rel="noopener noreferrer"
+      [href]="entry.href"
+      >{{ entry.source }}</a
+    >
+    } @else { {{ entry.source }} }
+  </li>
+  }
+</ul>
+} @else {
+<p class="mt-2 text-sm text-muted">No Source Catalogue yet.</p>
+}

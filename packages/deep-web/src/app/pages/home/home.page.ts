@@ -1,10 +1,11 @@
 import { Component, inject, signal } from '@angular/core'
 import { GrillingThread } from '../../components/grilling-thread/grilling-thread'
+import { SourceCataloguePanel } from '../../components/source-catalogue-panel/source-catalogue-panel'
 import { Stepper } from '../../components/stepper/stepper'
 import { ResearchApi } from '../../services/research-api'
 
 @Component({
-  imports: [GrillingThread, Stepper],
+  imports: [GrillingThread, SourceCataloguePanel, Stepper],
   templateUrl: 'home.page.html',
 })
 export class HomePage {

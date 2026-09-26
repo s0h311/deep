@@ -7,6 +7,7 @@ import { stubFailedSend, stubStream } from '../../../testing/fake-stream'
 import { HomePage } from './home.page'
 
 const GRILLING_TRANSCRIPT_URL = '/api/research/artifacts/grilling_transcript.json'
+const SOURCE_CATALOGUE = 'heat_pumps_source_catalogue.json'
 
 /** A Grilling Transcript whose first question is still unanswered. */
 const FIRST_QUESTION: GrillingTranscript = {
@@ -14,7 +15,12 @@ const FIRST_QUESTION: GrillingTranscript = {
   turns: [{ question: 'Who is the audience?', recommendedAnswer: 'Homeowners considering one.' }],
 }
 
-async function renderPage(api: { state?: ResearchState; artifacts?: string[]; transcript?: GrillingTranscript }) {
+async function renderPage(api: {
+  state?: ResearchState
+  artifacts?: string[]
+  transcript?: GrillingTranscript
+  sources?: string[]
+}) {
   TestBed.configureTestingModule({ providers: [provideHttpClient(), provideHttpClientTesting()] })
   const fixture = TestBed.createComponent(HomePage)
   const http = TestBed.inject(HttpTestingController)
@@ -25,6 +31,10 @@ async function renderPage(api: { state?: ResearchState; artifacts?: string[]; tr
   // During Grilling the page reads the Grilling Transcript to build the chat thread.
   for (const request of http.match({ method: 'GET', url: GRILLING_TRANSCRIPT_URL })) {
     request.flush(api.transcript ?? FIRST_QUESTION)
+  }
+  // Once the Source Catalogue exists, the page reads it for its panel.
+  for (const request of http.match({ method: 'GET', url: `/api/research/artifacts/${SOURCE_CATALOGUE}` })) {
+    request.flush({ sources: api.sources ?? [] })
   }
   await fixture.whenStable()
   http.verify()
@@ -76,6 +86,14 @@ function useRecommendation(page: HTMLElement): HTMLButtonElement | undefined {
 /** The page's button with the given label, if it shows one. */
 function button(page: HTMLElement, label: string): HTMLButtonElement | undefined {
   return [...page.querySelectorAll('button')].find((item) => item.textContent?.trim() === label)
+}
+
+/** The Source Catalogue panel's Sources, each as its text and link target, if it links. */
+function sources(page: HTMLElement): { text: string; href?: string }[] {
+  return [...page.querySelectorAll('app-source-catalogue-panel li')].map((item) => ({
+    text: item.textContent?.trim() ?? '',
+    href: item.querySelector('a')?.getAttribute('href') ?? undefined,
+  }))
 }
 
 /** The stepper's current Step, the one marked aria-current. */
@@ -257,6 +275,53 @@ describe('HomePage', () => {
     })
   })
 
+  describe('Source Catalogue panel', () => {
+    it('lists every Source, linking concrete hosts and showing wildcard patterns as text', async () => {
+      const page = await renderPage({
+        state: { status: 'running', step: 'retrieval' },
+        artifacts: ['heat_pumps_grilling_protocol.md', SOURCE_CATALOGUE],
+        sources: ['energy.gov', '*.europa.eu'],
+      })
+
+      expect(sources(page)).toEqual([
+        { text: 'energy.gov', href: 'https://energy.gov' },
+        { text: '*.europa.eu', href: undefined },
+      ])
+    })
+
+    it('says there is no Source Catalogue before its Step writes it', async () => {
+      const page = await renderPage({ state: { status: 'running', step: 'source_catalogue' } })
+
+      expect(page.querySelector('app-source-catalogue-panel')?.textContent).toContain('No Source Catalogue yet.')
+    })
+
+    it('shows the Source Catalogue once its Step has written it, without a reload', async () => {
+      const page = await renderPage({
+        state: { status: 'interrupted', step: 'source_catalogue' },
+        artifacts: ['heat_pumps_grilling_protocol.md'],
+      })
+      const http = TestBed.inject(HttpTestingController)
+      const stream = stubStream()
+
+      button(page, 'Resume')?.click()
+      stream.push({ type: 'step', step: 'source_catalogue' })
+      await settle()
+      http.expectOne({ method: 'GET', url: '/api/research/artifacts' }).flush(['heat_pumps_grilling_protocol.md'])
+      stream.push({ type: 'step', step: 'retrieval' })
+      await settle()
+      http
+        .expectOne({ method: 'GET', url: '/api/research/artifacts' })
+        .flush(['heat_pumps_grilling_protocol.md', SOURCE_CATALOGUE])
+      await settle()
+      http
+        .expectOne({ method: 'GET', url: `/api/research/artifacts/${SOURCE_CATALOGUE}` })
+        .flush({ sources: ['energy.gov'] })
+      await settle()
+
+      expect(sources(page)).toEqual([{ text: 'energy.gov', href: 'https://energy.gov' }])
+    })
+  })
+
   it("shows the names of the Research's Artifacts", async () => {
     const page = await renderPage({ artifacts: ['q.gp.md', 'q.sc.json'] })
 
@@ -410,7 +475,9 @@ describe('HomePage', () => {
       send(page, 'How do heat pumps work?')
       stream.push({ type: 'step', step: 'grilling' })
       await settle()
-      TestBed.inject(HttpTestingController)
+      const http = TestBed.inject(HttpTestingController)
+      http.expectOne({ method: 'GET', url: '/api/research/artifacts' }).flush(['grilling_transcript.json'])
+      http
         .expectOne({ method: 'GET', url: GRILLING_TRANSCRIPT_URL })
         .flush({ question: 'How do heat pumps work?', turns: [] })
       await settle()
