@@ -1,27 +1,26 @@
 import { defineHandler } from 'nitro'
 import { EventStream, readValidatedBody } from 'nitro/h3'
 import { z } from 'zod'
-import { randomUUID } from 'node:crypto'
-import { research, type WriterFn } from '~/src/features/research'
+import { createResearch, type Emit } from '../../features/research/index.ts'
 
 const request = z.object({
-  question: z.string(),
+  message: z.string(),
 })
 
+const research = createResearch()
+
 export default defineHandler(async (event) => {
-  const { question } = await readValidatedBody(event, request)
+  const { message } = await readValidatedBody(event, request)
 
   const stream = new EventStream(event)
 
-  const writerFn: WriterFn = async (data) => {
+  const emit: Emit = async (data) => {
     await stream.push(JSON.stringify(data))
   }
 
-  void research({
-    question,
-    writerFn,
-  })
-    .catch(async () => await writerFn({ id: randomUUID(), message: 'API error' }))
+  void research
+    .send(message, emit)
+    .catch(async (error: unknown) => await emit({ type: 'step', step: 'failed', reason: String(error) }))
     .finally(() => stream.close())
 
   return stream

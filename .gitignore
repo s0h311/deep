@@ -12,3 +12,4 @@ dist
 .DS_Store
 
 packages/deep-web/.angular/cache
+.research

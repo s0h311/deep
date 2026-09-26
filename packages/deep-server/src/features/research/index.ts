@@ -1,95 +1,110 @@
 import { z } from 'zod'
-import { runAgent } from '~/src/infrastructure/agent/client.ts'
-import { chatModel } from '~/src/infrastructure/agent/model.ts'
-import { structuredResponse } from '~/src/infrastructure/agent/scripted-chat-model.ts'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { runAgent } from '../../infrastructure/agent/client.ts'
+import { chatModel } from '../../infrastructure/agent/model.ts'
+import { structuredResponse } from '../../infrastructure/agent/scripted-chat-model.ts'
+import type { Model } from '../../infrastructure/agent/types.ts'
+import { defined } from '../../infrastructure/utils/utils.ts'
+import { appSkill, researchDirectory } from './paths.ts'
 
-type Step = 'grilling' | 'create_catalogue' | 'retrieval' | `draft_${number}` | `review_${number}` | 'done' | 'fail'
+export type ResearchEvent =
+  | { type: 'step'; step: 'grilling' | 'awaiting_answer' }
+  | { type: 'step'; step: 'failed'; reason: string }
+  | { type: 'text'; text: string }
 
-type Update =
-  | {
-      type: 'step'
-      value: Step
-    }
-  | {
-      id: string
-      message: string
-    }
+export type Emit = (event: ResearchEvent) => void | Promise<void>
 
-export type WriterFn = (update: Update) => Promise<void>
+export type Research = {
+  /** Advances the Research according to its state, emitting progress until a terminal step value. */
+  send(message: string, emit: Emit): Promise<void>
+}
 
 type ResearchConfig = {
-  question: string
-  // TODO make create_catalogue optional by accepting a catalogue as input
-  // TODO make grilling optional, or maybe not
-  writerFn: WriterFn
+  model?: Model
+  /** The directory holding the Research's Artifacts. */
+  root?: string
 }
 
-const MAX_REVIEW_ROUNDS = 3
+type GrillingTurn = { question: string; recommendedAnswer: string; answer?: string }
 
-export async function research(config: ResearchConfig): Promise<void> {
-  const { question, writerFn } = config
+/** Working file of the Grilling Step, kept until the Grilling Protocol exists. */
+type GrillingTranscript = { question: string; turns: GrillingTurn[] }
 
-  writerFn({ type: 'step', value: 'grilling' })
-  const topicName = await grill(config)
+const GRILLING_TRANSCRIPT = 'grilling_transcript.json'
 
-  writerFn({ type: 'step', value: 'create_catalogue' })
-  await createCatalogue(question)
-
-  writerFn({ type: 'step', value: 'retrieval' })
-  await retrieveInformation(question, topicName)
-
-  let reviewRounds = 0
-  let reviewPassed: boolean = false
-
-  while (reviewRounds < MAX_REVIEW_ROUNDS && !reviewPassed) {
-    reviewRounds++
-
-    writerFn({ type: 'step', value: `draft_${reviewRounds}` })
-    await draft(topicName)
-
-    writerFn({ type: 'step', value: `review_${reviewRounds}` })
-    reviewPassed = await review(topicName)
-  }
-
-  if (!reviewPassed) {
-    writerFn({ type: 'step', value: 'fail' })
-
-    return
-  }
-
-  writerFn({ type: 'step', value: 'done' })
-}
-
-const grillingTurn = z.object({
-  message: z.string(),
-  topic: z.string(),
+const grillingQuestion = z.object({
+  question: z.string(),
+  recommendedAnswer: z.string(),
 })
 
-async function grill({ question, writerFn }: ResearchConfig): Promise<string> {
-  const systemPrompt = `The user wants to conduct research about a topic. Before anything we have to clarify the scope and the goal of the research.
-Respond with your message to the user and the name of the topic, e.g. Arabica_Beans.`
+const GRILLING_SYSTEM_PROMPT = `You run the Grilling Step of a Research: interview the researcher about the scope, goal and audience of their Research, following the grilling skill.
+You are given the researcher's question and the interview so far. Respond with your next question and your recommended answer to it.`
 
-  const { message, topic } = await runAgent({
-    model: chatModel(() => structuredResponse({ message: 'What is the goal of the research?', topic: 'research' })),
-    systemPrompt,
-    message: question,
-    responseFormat: grillingTurn,
+const fakeScript = () =>
+  structuredResponse({
+    question: 'Who is the audience of the Report?',
+    recommendedAnswer: 'Yourself: someone curious but new to the topic.',
   })
 
-  await writerFn({
-    id: crypto.randomUUID(),
-    message,
-  })
+export function createResearch({
+  model = chatModel(fakeScript),
+  root = researchDirectory(),
+}: ResearchConfig = {}): Research {
+  async function grill(transcript: GrillingTranscript, emit: Emit): Promise<void> {
+    await emit({ type: 'step', step: 'grilling' })
 
-  return topic
+    const turn = await runAgent({
+      model,
+      systemPrompt: GRILLING_SYSTEM_PROMPT,
+      message: renderTranscript(transcript),
+      responseFormat: grillingQuestion,
+      skill: appSkill('grilling'),
+    })
+    transcript.turns.push(turn)
+
+    await mkdir(root, { recursive: true })
+    await writeFile(join(root, GRILLING_TRANSCRIPT), JSON.stringify(transcript, null, 2))
+
+    await emit({ type: 'text', text: renderQuestion(turn, transcript.turns.length) })
+    await emit({ type: 'step', step: 'awaiting_answer' })
+  }
+
+  /** The Research's state, derived solely from which Artifacts exist: empty, or Grilling with its transcript. */
+  async function readTranscript(): Promise<GrillingTranscript | undefined> {
+    try {
+      return JSON.parse(await readFile(join(root, GRILLING_TRANSCRIPT), 'utf8'))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return undefined
+      }
+
+      throw error
+    }
+  }
+
+  return {
+    async send(message, emit) {
+      const transcript = await readTranscript()
+
+      if (transcript) {
+        defined(transcript.turns.at(-1)).answer = message
+      }
+
+      await grill(transcript ?? { question: message, turns: [] }, emit)
+    },
+  }
 }
 
-async function createCatalogue(question: ResearchConfig['question']): Promise<void> {}
+function renderTranscript({ question, turns }: GrillingTranscript): string {
+  const interview = turns.map(
+    (turn, index) =>
+      `Q${index + 1}: ${turn.question}\nRecommended answer: ${turn.recommendedAnswer}\nAnswer: ${turn.answer}`,
+  )
 
-async function retrieveInformation(question: ResearchConfig['question'], topicName: string): Promise<void> {}
+  return [`Research question: ${question}`, ...interview].join('\n\n')
+}
 
-async function draft(topicName: string): Promise<void> {}
-
-async function review(topicName: string): Promise<boolean> {
-  return true
+function renderQuestion({ question, recommendedAnswer }: GrillingTurn, number: number): string {
+  return `❓ **Q${number}**: ${question}\n\n➡️ ${recommendedAnswer}`
 }
