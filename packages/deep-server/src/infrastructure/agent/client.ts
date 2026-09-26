@@ -1,70 +1,58 @@
-import { createDeepAgent, type DeepAgent, type DeepAgentRunStream, FilesystemBackend, type SubAgent } from 'deepagents'
-import { type AgentMiddleware } from 'langchain'
-import { MemorySaver } from '@langchain/langgraph'
-import type { Model } from '~/src/features/harness/types.ts'
-import type { Tool } from './types.ts'
-import { join } from 'node:path'
+import { CompositeBackend, createDeepAgent, FilesystemBackend, StateBackend } from 'deepagents'
+import { basename } from 'node:path'
+import { toolStrategy } from 'langchain'
+import type { z } from 'zod'
+import type { Model, Tool } from './types.ts'
+import { STRUCTURED_RESPONSE_TOOL } from './scripted-chat-model.ts'
 
-export type AgentConfig = {
+export type RunAgentParams<Response extends z.ZodObject> = {
   model: Model
-  tools: Tool[]
   systemPrompt: string
-  middleware?: AgentMiddleware[]
-  rootDir: string
-  subagents?: SubAgent[]
-  skills: string[]
-}
-
-export type StreamAgentParams = {
   message: string
-  threadId: string
-  agentConfig: AgentConfig
+  responseFormat: Response
+  tools?: Tool[]
+  /** Absolute path of the one app skill directory the agent may read. */
+  skill?: string
+  signal?: AbortSignal
 }
 
 const AGENT_GENERATION_RECURSION_LIMIT = 200
+const SKILLS_ROUTE = '/skills/'
 
-const checkpointer = new MemorySaver()
-const agents = new Map<string, DeepAgent>()
+/**
+ * Runs a fresh, single-message deep agent on a new thread and returns its schema-validated structured response.
+ */
+export async function runAgent<Response extends z.ZodObject>({
+  model,
+  systemPrompt,
+  message,
+  responseFormat,
+  tools = [],
+  skill,
+  signal,
+}: RunAgentParams<Response>): Promise<z.infer<Response>> {
+  // Widened so the agent's state type resolves; the response is re-parsed with the precise schema below.
+  const format: z.ZodObject = responseFormat.meta({ title: STRUCTURED_RESPONSE_TOOL })
+  const skillRoute = skill && `${SKILLS_ROUTE}${basename(skill)}/`
 
-export function streamAgent({ message, threadId, agentConfig }: StreamAgentParams): Promise<DeepAgentRunStream> {
-  return getAgent(threadId, agentConfig).streamEvents(
-    {
-      messages: [{ role: 'human', content: message }],
-    },
-    {
-      version: 'v3',
-      configurable: { thread_id: threadId },
-      recursionLimit: AGENT_GENERATION_RECURSION_LIMIT,
-    },
-  )
-}
-
-function getAgent(threadId: string, agentConfig: AgentConfig): DeepAgent {
-  const currentAgent = agents.get(threadId)
-
-  if (currentAgent) {
-    return currentAgent
-  }
-
-  const agent = createAgent({
-    ...agentConfig,
-    rootDir: join(agentConfig.rootDir, threadId),
-  })
-
-  agents.set(threadId, agent)
-
-  return agent
-}
-
-function createAgent({ model, tools, systemPrompt, middleware, rootDir, subagents, skills }: AgentConfig): DeepAgent {
-  return createDeepAgent({
+  const agent = createDeepAgent({
     model,
     tools,
     systemPrompt,
-    middleware,
-    backend: new FilesystemBackend({ rootDir, virtualMode: true }),
-    checkpointer,
-    subagents,
-    skills,
+    // Scratch space lives in agent state; the skill is the only thing on disk the agent can see.
+    backend: new CompositeBackend(
+      new StateBackend(),
+      skillRoute ? { [skillRoute]: new FilesystemBackend({ rootDir: skill, virtualMode: true }) } : {},
+    ),
+    skills: skillRoute ? [skillRoute] : [],
+    permissions: [{ operations: ['write'], paths: [`${SKILLS_ROUTE}**`], mode: 'deny' }],
+    responseFormat: toolStrategy(format, { handleError: false }),
   })
+
+  const { structuredResponse } = await agent.invoke(
+    { messages: [{ role: 'human', content: message }] },
+    { signal, recursionLimit: AGENT_GENERATION_RECURSION_LIMIT },
+  )
+
+  return responseFormat.parse(structuredResponse)
 }

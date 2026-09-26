@@ -1,8 +1,7 @@
-import { type AgentConfig, streamAgent } from '~/src/infrastructure/agent/client.ts'
-import { claudeHaiku45, webSearchTool } from '~/src/infrastructure/agent/providers/anthropic.ts'
-
-const SKILLS: string[] = ['.agents/skills/grilling']
-const RESEARCH_ROOT_DIRECTORY = '.research'
+import { z } from 'zod'
+import { runAgent } from '~/src/infrastructure/agent/client.ts'
+import { chatModel } from '~/src/infrastructure/agent/model.ts'
+import { structuredResponse } from '~/src/infrastructure/agent/scripted-chat-model.ts'
 
 type Step = 'grilling' | 'create_catalogue' | 'retrieval' | `draft_${number}` | `review_${number}` | 'done' | 'fail'
 
@@ -16,11 +15,13 @@ type Update =
       message: string
     }
 
+export type WriterFn = (update: Update) => Promise<void>
+
 type ResearchConfig = {
   question: string
   // TODO make create_catalogue optional by accepting a catalogue as input
   // TODO make grilling optional, or maybe not
-  writerFn: (step: Update) => Promise<void>
+  writerFn: WriterFn
 }
 
 const MAX_REVIEW_ROUNDS = 3
@@ -28,10 +29,8 @@ const MAX_REVIEW_ROUNDS = 3
 export async function research(config: ResearchConfig): Promise<void> {
   const { question, writerFn } = config
 
-  const threadId = crypto.randomUUID()
-
   writerFn({ type: 'step', value: 'grilling' })
-  const topicName = await grill(threadId, config)
+  const topicName = await grill(config)
 
   writerFn({ type: 'step', value: 'create_catalogue' })
   await createCatalogue(question)
@@ -61,53 +60,28 @@ export async function research(config: ResearchConfig): Promise<void> {
   writerFn({ type: 'step', value: 'done' })
 }
 
-const agentConfig: AgentConfig = {
-  model: claudeHaiku45,
-  tools: [webSearchTool],
-  systemPrompt: '',
-  middleware: [
-    // TODO maybe use this: todoListMiddleware
-  ],
-  rootDir: RESEARCH_ROOT_DIRECTORY,
-  skills: SKILLS,
-}
+const grillingTurn = z.object({
+  message: z.string(),
+  topic: z.string(),
+})
 
-async function grill(threadId: string, { question, writerFn }: ResearchConfig): Promise<string> {
+async function grill({ question, writerFn }: ResearchConfig): Promise<string> {
   const systemPrompt = `The user wants to conduct research about a topic. Before anything we have to clarify the scope and the goal of the research.
-Use /grilling skill to start a grilling session. When every gap is closed. Save the protocol of the grilling session
-in <topic-name>_grilling_protocol.md. Also return the name of the topic in XML Tags. Example: <topic-name>Arabica_Beans</topic-name>.`
+Respond with your message to the user and the name of the topic, e.g. Arabica_Beans.`
 
-  const agentConfig: AgentConfig = {
-    model: claudeHaiku45,
-    tools: [webSearchTool],
+  const { message, topic } = await runAgent({
+    model: chatModel(() => structuredResponse({ message: 'What is the goal of the research?', topic: 'research' })),
     systemPrompt,
-    rootDir: RESEARCH_ROOT_DIRECTORY,
-    skills: SKILLS,
-  }
-
-  const stream = await streamAgent({
     message: question,
-    threadId,
-    agentConfig,
+    responseFormat: grillingTurn,
   })
 
-  let name: string = ''
+  await writerFn({
+    id: crypto.randomUUID(),
+    message,
+  })
 
-  for await (const message of stream.messages) {
-    const text = await message.text
-
-    const matches = text.match(/<topic-name>(.*)<\/topic-name>/) ?? []
-    if (matches.length >= 2) {
-      name = matches[1]
-    }
-
-    await writerFn({
-      id: crypto.randomUUID(),
-      message: text,
-    })
-  }
-
-  return name
+  return topic
 }
 
 async function createCatalogue(question: ResearchConfig['question']): Promise<void> {}
