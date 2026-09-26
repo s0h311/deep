@@ -4,15 +4,21 @@ import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { runAgent } from '../../infrastructure/agent/client.ts'
 import { chatModel } from '../../infrastructure/agent/model.ts'
+import { webSearchTool } from '../../infrastructure/agent/providers/anthropic.ts'
 import { type Script, structuredResponse } from '../../infrastructure/agent/scripted-chat-model.ts'
 import type { Model } from '../../infrastructure/agent/types.ts'
 import { defined } from '../../infrastructure/utils/utils.ts'
 import { appSkill, researchDirectory } from './paths.ts'
 
 export type ResearchEvent =
-  | { type: 'step'; step: 'grilling' | 'awaiting_answer' }
+  | { type: 'step'; step: 'grilling' | 'awaiting_answer' | 'source_catalogue' }
   | { type: 'step'; step: 'failed'; reason: string }
   | { type: 'text'; text: string }
+
+/** A message the Research can't take in its state, e.g. one sent to a Failed Research. */
+export class ResearchConflict extends Error {
+  override name = 'ResearchConflict'
+}
 
 export type Emit = (event: ResearchEvent) => void | Promise<void>
 
@@ -29,6 +35,8 @@ type ResearchConfig = {
 
 type GrillingProtocol = z.infer<typeof grillingProtocol>
 
+type SourceCatalogue = z.infer<typeof sourceCatalogue>
+
 type GrillingTurn = { question: string; recommendedAnswer: string; answer?: string }
 
 /** Working file of the Grilling Step, kept until the Grilling Protocol exists. */
@@ -36,6 +44,7 @@ type GrillingTranscript = { question: string; turns: GrillingTurn[] }
 
 const GRILLING_TRANSCRIPT = 'grilling_transcript.json'
 const GRILLING_PROTOCOL_SUFFIX = '_grilling_protocol.md'
+const SOURCE_CATALOGUE_SUFFIX = '_source_catalogue.json'
 const MAX_TOPIC_SLUG_LENGTH = 50
 /** For a Topic with no ASCII letters or digits to keep. */
 const FALLBACK_TOPIC_SLUG = 'research'
@@ -69,16 +78,30 @@ const grillingResponse = z.object({
 
 const grillingOutcome = z.union([grillingConclusion, grillingQuestion])
 
+const sourceCatalogue = z.object({
+  sources: z.array(z.string()).describe('Bare hosts of the Primary Sources, e.g. "ecb.europa.eu".'),
+})
+
 const GRILLING_SYSTEM_PROMPT = `You run the Grilling Step of a Research: interview the researcher about the scope, goal and audience of their Research, following the grilling skill.
 You are given the researcher's question and the interview so far. Respond with either your next question and your recommended answer to it, or, once scope, goal and audience are settled, conclude with a Topic and the Grilling Protocol.`
+
+const SOURCE_CATALOGUE_SYSTEM_PROMPT = `You run the Source Catalogue Step of a Research: find the Primary Sources relevant to it, following the source-catalogue skill.
+You are given the Grilling Protocol of the Research. Search the web as much as you need, then respond with the bare hosts of the Primary Sources.`
+
+const NO_PRIMARY_SOURCES = 'No Primary Source could be identified for the Research.'
+const RESET_FIRST = 'The Research has ended; reset first to start a new one.'
 
 const MAX_GRILLING_QUESTIONS = 5
 
 const CONCLUDE_INSTRUCTION = `You have asked ${MAX_GRILLING_QUESTIONS} questions, the maximum. Conclude now with a Topic and the Grilling Protocol, recording every unresolved point as an open assumption.`
 
-/** Asks one question, then concludes once it is answered. */
-const fakeScript: Script = (messages) =>
-  messages.some((message) => HumanMessage.isInstance(message) && message.text.includes('\nAnswer: '))
+/** Grilling asks one question, then concludes once it is answered; the Source Catalogue lists two central banks. */
+const fakeScript: Script = (messages) => {
+  if (messages.some((message) => HumanMessage.isInstance(message) && message.text.startsWith('# Grilling Protocol'))) {
+    return structuredResponse({ sources: ['ecb.europa.eu', 'federalreserve.gov'] })
+  }
+
+  return messages.some((message) => HumanMessage.isInstance(message) && message.text.includes('\nAnswer: '))
     ? structuredResponse({
         done: true,
         topic: 'Fake Research',
@@ -93,12 +116,14 @@ const fakeScript: Script = (messages) =>
         question: 'Who is the audience of the Report?',
         recommendedAnswer: 'Yourself: someone curious but new to the topic.',
       })
+}
 
 export function createResearch({
   model = chatModel(fakeScript),
   root = researchDirectory(),
 }: ResearchConfig = {}): Research {
-  async function grill(transcript: GrillingTranscript, emit: Emit): Promise<void> {
+  /** Runs one Grilling turn, returning the Topic once Grilling concludes. */
+  async function grill(transcript: GrillingTranscript, emit: Emit): Promise<string | undefined> {
     await emit({ type: 'step', step: 'grilling' })
 
     // At the cap, the agent is told to conclude, and only a conclusion is accepted.
@@ -116,13 +141,15 @@ export function createResearch({
     await mkdir(root, { recursive: true })
 
     if ('done' in outcome) {
+      const topic = slugify(outcome.topic)
+
       await writeFile(
-        join(root, `${slugify(outcome.topic)}${GRILLING_PROTOCOL_SUFFIX}`),
+        join(root, `${topic}${GRILLING_PROTOCOL_SUFFIX}`),
         renderProtocol(transcript.question, outcome.protocol),
       )
       await rm(join(root, GRILLING_TRANSCRIPT), { force: true })
 
-      return
+      return topic
     }
 
     transcript.turns.push(outcome)
@@ -131,14 +158,43 @@ export function createResearch({
 
     await emit({ type: 'text', text: renderQuestion(outcome, transcript.turns.length) })
     await emit({ type: 'step', step: 'awaiting_answer' })
+
+    return undefined
   }
 
-  async function hasGrillingProtocol(): Promise<boolean> {
+  async function catalogueSources(topic: string, emit: Emit): Promise<void> {
+    await emit({ type: 'step', step: 'source_catalogue' })
+
+    const { sources } = await runAgent({
+      model,
+      systemPrompt: SOURCE_CATALOGUE_SYSTEM_PROMPT,
+      message: await readFile(join(root, `${topic}${GRILLING_PROTOCOL_SUFFIX}`), 'utf8'),
+      responseFormat: sourceCatalogue,
+      tools: [webSearchTool],
+      skill: appSkill('source-catalogue'),
+    })
+
+    const hosts = normaliseHosts(sources)
+
+    // An empty Source Catalogue is kept: it records that the Research failed.
+    await writeFile(join(root, `${topic}${SOURCE_CATALOGUE_SUFFIX}`), JSON.stringify({ sources: hosts }, null, 2))
+
+    if (!hosts.length) {
+      await emit({ type: 'step', step: 'failed', reason: NO_PRIMARY_SOURCES })
+    }
+  }
+
+  async function readSourceCatalogue(topic: string): Promise<SourceCatalogue> {
+    return sourceCatalogue.parse(JSON.parse(await readFile(join(root, `${topic}${SOURCE_CATALOGUE_SUFFIX}`), 'utf8')))
+  }
+
+  /** The names of all Artifacts and working files. */
+  async function artifactNames(): Promise<string[]> {
     try {
-      return (await readdir(root)).some((name) => name.endsWith(GRILLING_PROTOCOL_SUFFIX))
+      return await readdir(root)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return false
+        return []
       }
 
       throw error
@@ -160,18 +216,36 @@ export function createResearch({
 
   return {
     async send(message, emit) {
-      // Until the Source Catalogue Step exists, the Research stops once the Grilling Protocol is written.
-      if (await hasGrillingProtocol()) {
+      const names = await artifactNames()
+      const protocol = names.find((name) => name.endsWith(GRILLING_PROTOCOL_SUFFIX))
+      let topic = protocol?.slice(0, -GRILLING_PROTOCOL_SUFFIX.length)
+
+      if (topic === undefined) {
+        const transcript = await readTranscript()
+
+        if (transcript) {
+          defined(transcript.turns.at(-1)).answer = message
+        }
+
+        topic = await grill(transcript ?? { question: message, turns: [] }, emit)
+
+        if (topic === undefined) {
+          return
+        }
+      }
+
+      if (!names.includes(`${topic}${SOURCE_CATALOGUE_SUFFIX}`)) {
+        await catalogueSources(topic, emit)
+
         return
       }
 
-      const transcript = await readTranscript()
-
-      if (transcript) {
-        defined(transcript.turns.at(-1)).answer = message
+      // An empty Source Catalogue means Failed.
+      if (!(await readSourceCatalogue(topic)).sources.length) {
+        throw new ResearchConflict(RESET_FIRST)
       }
 
-      await grill(transcript ?? { question: message, turns: [] }, emit)
+      // Until the Retrieval Step exists, the Research stops once the Source Catalogue is written.
     },
   }
 }
@@ -216,6 +290,18 @@ ${audience}
 
 ${assumptions}
 `
+}
+
+/**
+ * The agent's Sources as bare, lowercase, unique hosts. A leading `*.` is dropped, as a host covers its subdomains
+ * anyway; entries with a scheme, path, port, other wildcard or whitespace are rejected.
+ */
+function normaliseHosts(sources: string[]): string[] {
+  const hosts = sources
+    .map((source) => source.trim().toLowerCase().replace(/^\*\./, ''))
+    .filter((host) => /^[^\s/:*?#@]+$/.test(host))
+
+  return [...new Set(hosts)]
 }
 
 /** The Topic as a snake_case `[a-z0-9_]` file name prefix: diacritics dropped, other characters collapsed to `_`. */
