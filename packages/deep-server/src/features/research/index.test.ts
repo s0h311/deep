@@ -158,7 +158,7 @@ describe('Research', () => {
       return messages.some((message) => HumanMessage.isInstance(message) && message.text.includes(answer))
     }
 
-    test('a multi-turn Grilling ends in a Grilling Protocol named after the Topic', async () => {
+    test('a multi-turn Grilling ends in a Grilling Protocol named after the Topic, keeping the Grilling Transcript', async () => {
       const model = researchModel((messages) => {
         if (answered(messages, 'The ECB and the Fed')) {
           return structuredResponse({ done: true, topic: 'Central bank rate setting', protocol })
@@ -183,8 +183,16 @@ describe('Research', () => {
         { type: 'step', step: 'awaiting_answer' },
         { type: 'step', step: 'completed' },
       ])
-      expect(await readdir(root)).toContain('central_bank_rate_setting_grilling_protocol.md')
-      expect(await readdir(root)).not.toContain('grilling_transcript.json')
+      expect(await research.listArtifacts()).toEqual(
+        expect.arrayContaining(['central_bank_rate_setting_grilling_protocol.md', 'grilling_transcript.json']),
+      )
+      expect(JSON.parse(await research.readArtifact('grilling_transcript.json'))).toEqual({
+        question: 'How do central banks set interest rates?',
+        turns: [
+          { question: 'Who is the audience?', recommendedAnswer: 'Retail investors', answer: 'Pension fund trustees' },
+          { question: 'Which central banks?', recommendedAnswer: 'The ECB and the Fed', answer: 'The ECB and the Fed' },
+        ],
+      })
       expect(await readFile(join(root, 'central_bank_rate_setting_grilling_protocol.md'), 'utf8')).toMatch(
         /How do central banks set interest rates\?[\s\S]*The ECB and the Fed, 2015 to 2025[\s\S]*Understand how policy rates are decided[\s\S]*Pension fund trustees/,
       )

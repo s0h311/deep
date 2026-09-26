@@ -95,7 +95,7 @@ type NextStep =
 
 type GrillingTurn = { question: string; recommendedAnswer: string; answer?: string }
 
-/** The Grilling Step's interim Artifact, deleted once the Grilling Protocol is written. */
+/** The record of the Grilling interview, kept after the Grilling Protocol is written; advancing then ignores it. */
 type GrillingTranscript = { question: string; turns: GrillingTurn[] }
 
 const GRILLING_TRANSCRIPT = 'grilling_transcript.json'
@@ -298,7 +298,6 @@ export function createResearch({
       const topic = slugify(outcome.topic)
 
       await writeFile(join(root, protocolName(topic)), renderProtocol(transcript.question, outcome.protocol))
-      await rm(join(root, GRILLING_TRANSCRIPT), { force: true })
 
       return true
     }
@@ -436,7 +435,7 @@ export function createResearch({
   /** Which Step runs next, or whether the Research has Failed or Completed, from its Artifacts alone. */
   async function nextStep(): Promise<NextStep> {
     const names = await artifactNames()
-    // The Topic comes from the Grilling Protocol; without one, Grilling runs.
+    // The Topic comes from the Grilling Protocol; without one, Grilling runs. Once it exists, the Grilling Transcript is ignored.
     const topic = names
       .find((name) => name.endsWith(GRILLING_PROTOCOL_SUFFIX))
       ?.slice(0, -GRILLING_PROTOCOL_SUFFIX.length)
