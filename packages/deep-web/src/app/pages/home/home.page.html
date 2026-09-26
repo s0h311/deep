@@ -1,0 +1,8 @@
+<main class="mx-auto max-w-3xl p-6">
+  <h2 class="text-sm font-medium text-muted">Artifacts</h2>
+  <ul class="mt-2 space-y-1">
+    @for (name of research.artifacts(); track name) {
+    <li class="font-mono text-sm">{{ name }}</li>
+    }
+  </ul>
+</main>
