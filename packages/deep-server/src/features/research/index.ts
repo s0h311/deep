@@ -21,6 +21,11 @@ export class ResearchConflict extends Error {
   override name = 'ResearchConflict'
 }
 
+/** A Step whose agent failed on every attempt, leaving the Research Interrupted. */
+class StepInterrupted extends Error {
+  override name = 'StepInterrupted'
+}
+
 export type Emit = (event: ResearchEvent) => void | Promise<void>
 
 export type Research = {
@@ -149,6 +154,8 @@ const RESET_FIRST = 'The Research has ended; reset first to start a new one.'
 
 const MAX_GRILLING_QUESTIONS = 5
 const MAX_ROUNDS = 3
+/** A Step's agent gets one retry after an error or schema-invalid output. */
+const STEP_ATTEMPTS = 2
 
 const CONCLUDE_INSTRUCTION = `You have asked ${MAX_GRILLING_QUESTIONS} questions, the maximum. Conclude now with a Topic and the Grilling Protocol, recording every unresolved point as an open assumption.`
 
@@ -220,14 +227,16 @@ export function createResearch({
 
     // At the cap, the agent is told to conclude, and only a conclusion is accepted.
     const mustConclude = transcript.turns.length >= MAX_GRILLING_QUESTIONS
-    const outcome = (mustConclude ? grillingConclusion : grillingOutcome).parse(
-      await runAgent({
-        model,
-        systemPrompt: GRILLING_SYSTEM_PROMPT,
-        message: [renderTranscript(transcript), ...(mustConclude ? [CONCLUDE_INSTRUCTION] : [])].join('\n\n'),
-        responseFormat: mustConclude ? grillingConclusion : grillingResponse,
-        skill: appSkill('grilling'),
-      }),
+    const outcome = await retried('Grilling', async () =>
+      (mustConclude ? grillingConclusion : grillingOutcome).parse(
+        await runAgent({
+          model,
+          systemPrompt: GRILLING_SYSTEM_PROMPT,
+          message: [renderTranscript(transcript), ...(mustConclude ? [CONCLUDE_INSTRUCTION] : [])].join('\n\n'),
+          responseFormat: mustConclude ? grillingConclusion : grillingResponse,
+          skill: appSkill('grilling'),
+        }),
+      ),
     )
 
     await mkdir(root, { recursive: true })
@@ -258,14 +267,17 @@ export function createResearch({
   async function catalogueSources(topic: string, emit: Emit): Promise<boolean> {
     await emit({ type: 'step', step: 'source_catalogue' })
 
-    const { sources } = await runAgent({
-      model,
-      systemPrompt: SOURCE_CATALOGUE_SYSTEM_PROMPT,
-      message: await readFile(join(root, `${topic}${GRILLING_PROTOCOL_SUFFIX}`), 'utf8'),
-      responseFormat: sourceCatalogue,
-      tools: [webSearchTool],
-      skill: appSkill('source-catalogue'),
-    })
+    const message = await readFile(join(root, `${topic}${GRILLING_PROTOCOL_SUFFIX}`), 'utf8')
+    const { sources } = await retried('Source Catalogue', () =>
+      runAgent({
+        model,
+        systemPrompt: SOURCE_CATALOGUE_SYSTEM_PROMPT,
+        message,
+        responseFormat: sourceCatalogue,
+        tools: [webSearchTool],
+        skill: appSkill('source-catalogue'),
+      }),
+    )
 
     const hosts = normaliseHosts(sources)
 
@@ -284,17 +296,20 @@ export function createResearch({
     await emit({ type: 'step', step: 'retrieval' })
 
     const { sources } = await readSourceCatalogue(topic)
-    const { findings } = await runAgent({
-      model,
-      systemPrompt: RETRIEVAL_SYSTEM_PROMPT,
-      message: [
-        await readFile(join(root, `${topic}${GRILLING_PROTOCOL_SUFFIX}`), 'utf8'),
-        renderSourceCatalogue(sources),
-      ].join('\n\n'),
-      responseFormat: retrieval,
-      tools: webToolsFor(sources),
-      skill: appSkill('retrieval'),
-    })
+    const message = [
+      await readFile(join(root, `${topic}${GRILLING_PROTOCOL_SUFFIX}`), 'utf8'),
+      renderSourceCatalogue(sources),
+    ].join('\n\n')
+    const { findings } = await retried('Retrieval', () =>
+      runAgent({
+        model,
+        systemPrompt: RETRIEVAL_SYSTEM_PROMPT,
+        message,
+        responseFormat: retrieval,
+        tools: webToolsFor(sources),
+        skill: appSkill('retrieval'),
+      }),
+    )
 
     const valid = findings.filter(({ url }) => isOnSource(url, sources))
 
@@ -321,15 +336,14 @@ export function createResearch({
             await readFile(join(root, reviewName(topic, round - 1)), 'utf8'),
           ]
         : []
-    const response = await runAgent({
-      model,
-      systemPrompt: DRAFT_SYSTEM_PROMPT,
-      message: [await readFile(join(root, `${topic}${GRILLING_PROTOCOL_SUFFIX}`), 'utf8'), findings, ...previous].join(
-        '\n\n',
-      ),
-      responseFormat: draft,
-      skill: appSkill('draft'),
-    })
+    const message = [
+      await readFile(join(root, `${topic}${GRILLING_PROTOCOL_SUFFIX}`), 'utf8'),
+      findings,
+      ...previous,
+    ].join('\n\n')
+    const response = await retried('Draft', () =>
+      runAgent({ model, systemPrompt: DRAFT_SYSTEM_PROMPT, message, responseFormat: draft, skill: appSkill('draft') }),
+    )
 
     await writeFile(join(root, draftName(topic, round)), renderDraft(response, parseFindingUrls(findings)))
   }
@@ -338,16 +352,19 @@ export function createResearch({
   async function reviewDraft({ topic, round }: Round, emit: Emit): Promise<Verdict> {
     await emit({ type: 'step', step: 'review', round })
 
-    const response = await runAgent({
-      model,
-      systemPrompt: REVIEW_SYSTEM_PROMPT,
-      message: [
-        await readFile(join(root, draftName(topic, round)), 'utf8'),
-        await readFile(join(root, `${topic}${FINDINGS_SUFFIX}`), 'utf8'),
-      ].join('\n\n'),
-      responseFormat: review,
-      skill: appSkill('review'),
-    })
+    const message = [
+      await readFile(join(root, draftName(topic, round)), 'utf8'),
+      await readFile(join(root, `${topic}${FINDINGS_SUFFIX}`), 'utf8'),
+    ].join('\n\n')
+    const response = await retried('Review', () =>
+      runAgent({
+        model,
+        systemPrompt: REVIEW_SYSTEM_PROMPT,
+        message,
+        responseFormat: review,
+        skill: appSkill('review'),
+      }),
+    )
 
     await writeFile(join(root, reviewName(topic, round)), renderReview(response, round))
 
@@ -394,78 +411,110 @@ export function createResearch({
     }
   }
 
-  return {
-    async send(message, emit) {
-      const names = await artifactNames()
-      const protocol = names.find((name) => name.endsWith(GRILLING_PROTOCOL_SUFFIX))
-      let topic = protocol?.slice(0, -GRILLING_PROTOCOL_SUFFIX.length)
+  /** Advances the Research from the state its Artifacts describe. */
+  async function advance(message: string, emit: Emit): Promise<void> {
+    const names = await artifactNames()
+    const protocol = names.find((name) => name.endsWith(GRILLING_PROTOCOL_SUFFIX))
+    let topic = protocol?.slice(0, -GRILLING_PROTOCOL_SUFFIX.length)
+
+    if (topic === undefined) {
+      const transcript = await readTranscript()
+
+      if (transcript) {
+        defined(transcript.turns.at(-1)).answer = message
+      }
+
+      topic = await grill(transcript ?? { question: message, turns: [] }, emit)
 
       if (topic === undefined) {
-        const transcript = await readTranscript()
+        return
+      }
+    }
 
-        if (transcript) {
-          defined(transcript.turns.at(-1)).answer = message
-        }
+    if (!names.includes(`${topic}${SOURCE_CATALOGUE_SUFFIX}`)) {
+      if (!(await catalogueSources(topic, emit))) {
+        return
+      }
+    } else if (!(await readSourceCatalogue(topic)).sources.length) {
+      // An empty Source Catalogue means Failed.
+      throw new ResearchConflict(RESET_FIRST)
+    }
 
-        topic = await grill(transcript ?? { question: message, turns: [] }, emit)
+    if (!names.includes(`${topic}${FINDINGS_SUFFIX}`)) {
+      if (!(await retrieve(topic, emit))) {
+        return
+      }
+    } else if (!(await hasFindings(topic))) {
+      // A Findings file with no entries means Failed.
+      throw new ResearchConflict(RESET_FIRST)
+    }
 
-        if (topic === undefined) {
+    if (names.includes(`${topic}${REPORT_SUFFIX}`)) {
+      throw new ResearchConflict(RESET_FIRST)
+    }
+
+    let round = Math.max(1, lastRound(topic, names))
+    let verdict = names.includes(reviewName(topic, round)) ? await readVerdict({ topic, round }) : undefined
+
+    if (verdict === 'fail' && round === MAX_ROUNDS) {
+      // A failed last Round means Failed.
+      throw new ResearchConflict(RESET_FIRST)
+    }
+
+    while (verdict !== 'pass') {
+      if (verdict === 'fail') {
+        if (round === MAX_ROUNDS) {
+          await emit({ type: 'step', step: 'failed', reason: ALL_ROUNDS_FAILED })
+
           return
         }
+
+        round += 1
       }
 
-      if (!names.includes(`${topic}${SOURCE_CATALOGUE_SUFFIX}`)) {
-        if (!(await catalogueSources(topic, emit))) {
-          return
-        }
-      } else if (!(await readSourceCatalogue(topic)).sources.length) {
-        // An empty Source Catalogue means Failed.
-        throw new ResearchConflict(RESET_FIRST)
+      // A Draft without its Review is reviewed, not drafted again.
+      if (!names.includes(draftName(topic, round))) {
+        await writeDraft({ topic, round }, emit)
       }
 
-      if (!names.includes(`${topic}${FINDINGS_SUFFIX}`)) {
-        if (!(await retrieve(topic, emit))) {
-          return
-        }
-      } else if (!(await hasFindings(topic))) {
-        // A Findings file with no entries means Failed.
-        throw new ResearchConflict(RESET_FIRST)
-      }
+      verdict = await reviewDraft({ topic, round }, emit)
+    }
 
-      if (names.includes(`${topic}${REPORT_SUFFIX}`)) {
-        throw new ResearchConflict(RESET_FIRST)
-      }
+    await copyFile(join(root, draftName(topic, round)), join(root, `${topic}${REPORT_SUFFIX}`))
+    await emit({ type: 'step', step: 'completed' })
+  }
 
-      let round = Math.max(1, lastRound(topic, names))
-      let verdict = names.includes(reviewName(topic, round)) ? await readVerdict({ topic, round }) : undefined
-
-      if (verdict === 'fail' && round === MAX_ROUNDS) {
-        // A failed last Round means Failed.
-        throw new ResearchConflict(RESET_FIRST)
-      }
-
-      while (verdict !== 'pass') {
-        if (verdict === 'fail') {
-          if (round === MAX_ROUNDS) {
-            await emit({ type: 'step', step: 'failed', reason: ALL_ROUNDS_FAILED })
-
-            return
-          }
-
-          round += 1
+  return {
+    async send(message, emit) {
+      try {
+        await advance(message, emit)
+      } catch (error) {
+        if (!(error instanceof StepInterrupted)) {
+          throw error
         }
 
-        // A Draft without its Review is reviewed, not drafted again.
-        if (!names.includes(draftName(topic, round))) {
-          await writeDraft({ topic, round }, emit)
-        }
-
-        verdict = await reviewDraft({ topic, round }, emit)
+        await emit({ type: 'step', step: 'failed', reason: error.message })
       }
-
-      await copyFile(join(root, draftName(topic, round)), join(root, `${topic}${REPORT_SUFFIX}`))
-      await emit({ type: 'step', step: 'completed' })
     },
+  }
+}
+
+/**
+ * Runs a Step's agent call, retrying it after an error or schema-invalid output; once the attempts run out, the
+ * Step is interrupted.
+ */
+async function retried<Response>(step: string, run: () => Promise<Response>): Promise<Response> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await run()
+    } catch (error) {
+      if (attempt >= STEP_ATTEMPTS) {
+        throw new StepInterrupted(
+          `The ${step} Step failed ${STEP_ATTEMPTS} times (${error instanceof Error ? error.message : String(error)}); send a message to resume.`,
+          { cause: error },
+        )
+      }
+    }
   }
 }
 

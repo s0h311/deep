@@ -33,6 +33,21 @@ const failingReview: Review = {
   offendingClaims: [{ claim: 'The ECB cut rates in July 2025.', reason: 'F1 says the rates stayed unchanged.' }],
 }
 
+/** Throws on its first `times` calls, then returns the response. */
+function flaky<Response>(times: number, response: Response): () => Response {
+  let calls = 0
+
+  return () => {
+    calls += 1
+
+    if (calls <= times) {
+      throw new Error('overloaded')
+    }
+
+    return response
+  }
+}
+
 /**
  * Answers the Source Catalogue agent with the given hosts, the Retrieval agent with the given Findings, the Draft and
  * Review agents with the given Draft and Review, and every other agent with the Grilling script.
@@ -496,19 +511,9 @@ describe('Research', () => {
     })
 
     test('a Draft without its Review is reviewed next, without drafting again', async () => {
-      let reviewed = false
-      const model = researchModel(() => conclusion, {
-        review: () => {
-          if (!reviewed) {
-            reviewed = true
-            throw new Error('overloaded')
-          }
-
-          return passingReview
-        },
-      })
+      const model = researchModel(() => conclusion, { review: flaky(2, passingReview) })
       const research = createResearch({ model, root })
-      await send(research, 'What did the ECB decide on rates in July 2025?').catch(() => {})
+      await send(research, 'What did the ECB decide on rates in July 2025?')
 
       const events = await send(research, 'Go on')
 
@@ -623,11 +628,11 @@ describe('Research', () => {
 
     test('an Interrupted Research after a failed Review resumes with the next Draft', async () => {
       let drafts = 0
-      let interrupted = false
+      let interruptions = 0
       const model = researchModel(() => conclusion, {
         draft: () => {
-          if (drafts === 1 && !interrupted) {
-            interrupted = true
+          if (drafts === 1 && interruptions < 2) {
+            interruptions += 1
             throw new Error('overloaded')
           }
 
@@ -636,7 +641,7 @@ describe('Research', () => {
         review: () => (drafts === 1 ? failingReview : passingReview),
       })
       const research = createResearch({ model, root })
-      await send(research, 'What did the ECB decide on rates in July 2025?').catch(() => {})
+      await send(research, 'What did the ECB decide on rates in July 2025?')
 
       const events = await send(research, 'Go on')
 
@@ -646,6 +651,70 @@ describe('Research', () => {
         { type: 'step', step: 'completed' },
       ])
       expect(await readFile(join(root, 'ecb_rates_report.md'), 'utf8')).toMatch(/Draft 2: the ECB held/)
+    })
+  })
+
+  describe('Interruptions', () => {
+    const conclusion = structuredResponse({
+      done: true,
+      topic: 'ECB rates',
+      protocol: {
+        scope: 'The ECB, 2025',
+        goal: 'Understand the latest rate decision',
+        audience: 'Pension fund trustees',
+        openAssumptions: [],
+      },
+    })
+
+    test('a single agent error is retried transparently and the Research goes on', async () => {
+      const model = researchModel(() => conclusion, { review: flaky(1, passingReview) })
+
+      const events = await send(createResearch({ model, root }), 'What did the ECB decide on rates in July 2025?')
+
+      expect(events.slice(3)).toEqual([
+        { type: 'step', step: 'draft', round: 1 },
+        { type: 'step', step: 'review', round: 1 },
+        { type: 'step', step: 'completed' },
+      ])
+    })
+
+    test('two consecutive agent errors end the stream with failed, with a reason, and leave no Artifact for the Step', async () => {
+      const model = researchModel(() => conclusion, { draft: flaky(2, ecbDraft) })
+
+      const events = await send(createResearch({ model, root }), 'What did the ECB decide on rates in July 2025?')
+
+      expect(events.slice(3)).toEqual([
+        { type: 'step', step: 'draft', round: 1 },
+        { type: 'step', step: 'failed', reason: expect.stringMatching(/Draft[\s\S]*overloaded/) },
+      ])
+      expect(await readdir(root)).not.toContain('ecb_rates_draft_1.md')
+    })
+
+    test('schema-invalid output is retried like an error', async () => {
+      const reviews = [{ verdict: 'maybe', offendingClaims: [] }, passingReview] as Review[]
+      const model = researchModel(() => conclusion, { review: () => defined(reviews.shift()) })
+
+      const events = await send(createResearch({ model, root }), 'What did the ECB decide on rates in July 2025?')
+
+      expect(events.slice(3)).toEqual([
+        { type: 'step', step: 'draft', round: 1 },
+        { type: 'step', step: 'review', round: 1 },
+        { type: 'step', step: 'completed' },
+      ])
+    })
+
+    test('the next message resumes from the interrupted Step without running earlier Steps again', async () => {
+      const model = researchModel(() => conclusion, { draft: flaky(2, ecbDraft) })
+      const research = createResearch({ model, root })
+      await send(research, 'What did the ECB decide on rates in July 2025?')
+
+      const events = await send(research, 'Go on')
+
+      expect(events).toEqual([
+        { type: 'step', step: 'draft', round: 1 },
+        { type: 'step', step: 'review', round: 1 },
+        { type: 'step', step: 'completed' },
+      ])
     })
   })
 })
