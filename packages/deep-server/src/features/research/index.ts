@@ -69,6 +69,17 @@ type Verdict = Review['verdict']
 /** One Draft followed by its Review, numbered from 1. */
 type Round = { topic: string; round: number }
 
+/**
+ * Where the Research stands, derived from its Artifacts alone: the Step (and Round) that runs next, or Failed with
+ * its reason, or Completed. A Completed Research whose Report isn't published yet has its passing Round to publish.
+ */
+type NextStep =
+  | { step: 'grilling' }
+  | { step: 'source_catalogue' | 'retrieval'; topic: string }
+  | ({ step: 'draft' | 'review' } & Round)
+  | ({ step: 'completed'; published: boolean } & Round)
+  | { step: 'failed'; reason: string }
+
 type GrillingTurn = { question: string; recommendedAnswer: string; answer?: string }
 
 /** The Grilling Step's interim Artifact, deleted once the Grilling Protocol is written. */
@@ -248,8 +259,8 @@ export function createResearch({
     return await readFile(join(root, name), 'utf8')
   }
 
-  /** Runs one Grilling turn, returning the Topic once Grilling concludes. */
-  async function grill(transcript: GrillingTranscript, context: StepContext): Promise<string | undefined> {
+  /** Runs one Grilling turn, returning whether Grilling concluded. */
+  async function grill(transcript: GrillingTranscript, context: StepContext): Promise<boolean> {
     await context.emit({ type: 'step', step: 'grilling' })
 
     // At the cap, the agent is told to conclude, and only a conclusion is accepted.
@@ -276,7 +287,7 @@ export function createResearch({
       await writeFile(join(root, protocolName(topic)), renderProtocol(transcript.question, outcome.protocol))
       await rm(join(root, GRILLING_TRANSCRIPT), { force: true })
 
-      return topic
+      return true
     }
 
     transcript.turns.push(outcome)
@@ -286,11 +297,11 @@ export function createResearch({
     await context.emit({ type: 'text', text: renderQuestion(outcome, transcript.turns.length) })
     await context.emit({ type: 'step', step: 'awaiting_answer' })
 
-    return undefined
+    return false
   }
 
-  /** Runs the Source Catalogue Step, returning whether the Research goes on. */
-  async function catalogueSources(topic: string, context: StepContext): Promise<boolean> {
+  /** Runs the Source Catalogue Step. */
+  async function catalogueSources(topic: string, context: StepContext): Promise<void> {
     await context.emit({ type: 'step', step: 'source_catalogue' })
 
     const message = await read(protocolName(topic))
@@ -310,16 +321,10 @@ export function createResearch({
 
     // An empty Source Catalogue is kept: it records that the Research failed.
     await writeFile(join(root, catalogueName(topic)), JSON.stringify({ sources: hosts }, null, 2))
-
-    if (!hosts.length) {
-      await context.emit({ type: 'step', step: 'failed', reason: NO_PRIMARY_SOURCES })
-    }
-
-    return hosts.length > 0
   }
 
-  /** Runs the Retrieval Step, returning whether the Research goes on. */
-  async function retrieve(topic: string, context: StepContext): Promise<boolean> {
+  /** Runs the Retrieval Step. */
+  async function retrieve(topic: string, context: StepContext): Promise<void> {
     await context.emit({ type: 'step', step: 'retrieval' })
 
     const { sources } = await readSourceCatalogue(topic)
@@ -340,12 +345,6 @@ export function createResearch({
 
     // A Findings file with no entries is kept: it records that the Research failed.
     await writeFile(join(root, findingsName(topic)), renderFindings(valid))
-
-    if (!valid.length) {
-      await context.emit({ type: 'step', step: 'failed', reason: NO_FINDINGS })
-    }
-
-    return valid.length > 0
   }
 
   /** Runs the Draft Step of the Round. */
@@ -371,8 +370,8 @@ export function createResearch({
     await writeFile(join(root, draftName(topic, round)), renderDraft(response, parseFindingUrls(findings)))
   }
 
-  /** Runs the Review Step of the Round, returning its verdict. */
-  async function reviewDraft({ topic, round }: Round, context: StepContext): Promise<Verdict> {
+  /** Runs the Review Step of the Round. */
+  async function reviewDraft({ topic, round }: Round, context: StepContext): Promise<void> {
     await context.emit({ type: 'step', step: 'review', round })
 
     const message = [await read(draftName(topic, round)), await read(findingsName(topic))].join('\n\n')
@@ -388,8 +387,6 @@ export function createResearch({
     )
 
     await writeFile(join(root, reviewName(topic, round)), renderReview(response, round))
-
-    return response.verdict
   }
 
   async function readVerdict({ topic, round }: Round): Promise<Verdict> {
@@ -423,79 +420,114 @@ export function createResearch({
     await writeFile(join(root, GRILLING_TRANSCRIPT), JSON.stringify(transcript, null, 2))
   }
 
-  /** Advances the Research from the state its Artifacts describe. */
-  async function advance(message: string, context: StepContext): Promise<void> {
+  /** Which Step runs next, or whether the Research has Failed or Completed, from its Artifacts alone. */
+  async function nextStep(): Promise<NextStep> {
     const names = await artifactNames()
-    const protocol = names.find((name) => name.endsWith(GRILLING_PROTOCOL_SUFFIX))
-    let topic = protocol?.slice(0, -GRILLING_PROTOCOL_SUFFIX.length)
+    // The Topic comes from the Grilling Protocol; without one, Grilling runs.
+    const topic = names
+      .find((name) => name.endsWith(GRILLING_PROTOCOL_SUFFIX))
+      ?.slice(0, -GRILLING_PROTOCOL_SUFFIX.length)
 
     if (topic === undefined) {
-      const transcript = (await readTranscript()) ?? { question: message, turns: [] }
-      const last = transcript.turns.at(-1)
-
-      // Only an unanswered question takes the message; otherwise Grilling was Interrupted and the message is ignored.
-      if (last && last.answer === undefined) {
-        last.answer = message
-      }
-
-      topic = await grill(transcript, context)
-
-      if (topic === undefined) {
-        return
-      }
+      return { step: 'grilling' }
     }
 
     if (!names.includes(catalogueName(topic))) {
-      if (!(await catalogueSources(topic, context))) {
-        return
-      }
-    } else if (!(await readSourceCatalogue(topic)).sources.length) {
-      // An empty Source Catalogue means Failed.
-      throw new ResearchConflict(RESET_FIRST)
+      return { step: 'source_catalogue', topic }
+    }
+
+    // An empty Source Catalogue is kept to record that the Research failed.
+    if (!(await readSourceCatalogue(topic)).sources.length) {
+      return { step: 'failed', reason: NO_PRIMARY_SOURCES }
     }
 
     if (!names.includes(findingsName(topic))) {
-      if (!(await retrieve(topic, context))) {
-        return
-      }
-    } else if (!(await hasFindings(topic))) {
-      // A Findings file with no entries means Failed.
-      throw new ResearchConflict(RESET_FIRST)
+      return { step: 'retrieval', topic }
     }
+
+    // As is a Findings file with no entries.
+    if (!(await hasFindings(topic))) {
+      return { step: 'failed', reason: NO_FINDINGS }
+    }
+
+    const round = Math.max(1, lastRound(topic, names))
 
     if (names.includes(reportName(topic))) {
-      throw new ResearchConflict(RESET_FIRST)
+      return { step: 'completed', published: true, topic, round }
     }
 
-    let round = Math.max(1, lastRound(topic, names))
-    let verdict = names.includes(reviewName(topic, round)) ? await readVerdict({ topic, round }) : undefined
-
-    if (verdict === 'fail' && round === MAX_ROUNDS) {
-      // A failed last Round means Failed.
-      throw new ResearchConflict(RESET_FIRST)
+    if (!names.includes(draftName(topic, round))) {
+      return { step: 'draft', topic, round }
     }
 
-    while (verdict !== 'pass') {
-      if (verdict === 'fail') {
-        if (round === MAX_ROUNDS) {
-          await context.emit({ type: 'step', step: 'failed', reason: ALL_ROUNDS_FAILED })
+    // A Draft without its Review is reviewed, not drafted again.
+    if (!names.includes(reviewName(topic, round))) {
+      return { step: 'review', topic, round }
+    }
+
+    if ((await readVerdict({ topic, round })) === 'pass') {
+      return { step: 'completed', published: false, topic, round }
+    }
+
+    return round < MAX_ROUNDS
+      ? { step: 'draft', topic, round: round + 1 }
+      : { step: 'failed', reason: ALL_ROUNDS_FAILED }
+  }
+
+  /** Advances the Research Step by Step from where its Artifacts say it stands, until it awaits an answer or ends. */
+  async function advance(message: string, context: StepContext): Promise<void> {
+    for (let first = true; ; first = false) {
+      const next = await nextStep()
+
+      switch (next.step) {
+        case 'grilling': {
+          const transcript = (await readTranscript()) ?? { question: message, turns: [] }
+          const last = transcript.turns.at(-1)
+
+          // Only an unanswered question takes the message; otherwise Grilling was Interrupted and the message is ignored.
+          if (last && last.answer === undefined) {
+            last.answer = message
+          }
+
+          if (!(await grill(transcript, context))) {
+            return
+          }
+
+          break
+        }
+        case 'source_catalogue':
+          await catalogueSources(next.topic, context)
+          break
+        case 'retrieval':
+          await retrieve(next.topic, context)
+          break
+        case 'draft':
+          await writeDraft(next, context)
+          break
+        case 'review':
+          await reviewDraft(next, context)
+          break
+        case 'completed':
+          // A message to an ended Research is rejected.
+          if (next.published) {
+            throw new ResearchConflict(RESET_FIRST)
+          }
+
+          await copyFile(join(root, draftName(next.topic, next.round)), join(root, reportName(next.topic)))
+          await context.emit({ type: 'step', step: 'completed' })
 
           return
-        }
+        case 'failed':
+          // A message to an ended Research is rejected; one that just failed reports why.
+          if (first) {
+            throw new ResearchConflict(RESET_FIRST)
+          }
 
-        round += 1
+          await context.emit({ type: 'step', step: 'failed', reason: next.reason })
+
+          return
       }
-
-      // A Draft without its Review is reviewed, not drafted again.
-      if (!names.includes(draftName(topic, round))) {
-        await writeDraft({ topic, round }, context)
-      }
-
-      verdict = await reviewDraft({ topic, round }, context)
     }
-
-    await copyFile(join(root, draftName(topic, round)), join(root, reportName(topic)))
-    await context.emit({ type: 'step', step: 'completed' })
   }
 
   /** The send or reset in progress, whose controller aborts its agent calls. */
