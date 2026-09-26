@@ -1,0 +1,14 @@
+{
+  "maxIterations": 30,
+  "github": {
+    "owner": "s0h311",
+    "repo": "deep"
+  },
+  "checks": {
+    "strategy": "afterAll",
+    "fmtCmd": "pnpm fmt",
+    "lintCmd": "pnpm lint --format json",
+    "testCmd": "pnpm test"
+  },
+  "review": true
+}
