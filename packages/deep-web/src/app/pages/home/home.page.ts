@@ -25,14 +25,15 @@ export class HomePage {
 
   protected sendTyped(event: SubmitEvent): void {
     event.preventDefault()
-    const message = this.message().trim()
+    const message = this.message()
 
-    if (!message || this.research.busy()) {
+    if (!message.trim() || this.research.busy()) {
       return
     }
 
     this.message.set('')
-    this.send(message)
+    // An answer goes exactly as typed; only the question that starts the Research is trimmed.
+    this.send(this.research.state().status === 'none' ? message.trim() : message)
   }
 
   /** Continues an Interrupted Research: outside Awaiting Answer the Research ignores the message. */

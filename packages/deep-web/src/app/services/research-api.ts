@@ -84,8 +84,8 @@ export class ResearchApi {
     const artifact = this.opened()
     return artifact && artifact.kind !== 'grilling_transcript' ? artifactUrl(artifact.name) : undefined
   })
-  /** Where the loaded Research stands, ignoring any reason, so a poll that finds it unchanged is no change. */
-  private readonly step = computed(() => {
+  /** A key for where the loaded Research stands, ignoring any reason, so a poll that finds it unchanged is no change. */
+  private readonly stepKey = computed(() => {
     if (!this.researchState.hasValue()) {
       return undefined
     }
@@ -98,10 +98,13 @@ export class ResearchApi {
   private stream?: AbortController
   private readonly browser = isPlatformBrowser(inject(PLATFORM_ID))
   private readonly http = inject(HttpClient)
+  /** The last state read, kept while a re-read fails, so a dropped connection doesn't look like no Research. */
+  private readonly lastState = linkedSignal<ResearchState | undefined, ResearchState>({
+    source: () => (this.researchState.hasValue() ? this.researchState.value() : undefined),
+    computation: (state, previous) => state ?? previous?.value ?? { status: 'none' },
+  })
 
-  readonly state = computed<ResearchState>(() =>
-    this.researchState.hasValue() ? this.researchState.value() : { status: 'none' },
-  )
+  readonly state = this.lastState.asReadonly()
   readonly artifacts = computed(() => (this.artifactNames.hasValue() ? this.artifactNames.value() : []))
   /** The Artifacts in Step order, each Review with its verdict once read. */
   readonly artifactList = computed<ListedArtifact[]>(() => {
@@ -136,9 +139,9 @@ export class ResearchApi {
 
   constructor() {
     // A Step started by another tab, or before a reload, has no stream here, so it is followed by polling.
-    // A new state value re-runs this effect, which schedules the next poll while the Research still runs.
+    // Each read ending, even in an error, re-runs this effect, which schedules the next poll while the Research still runs.
     effect((onCleanup) => {
-      if (!this.browser || this.streaming() || this.state().status !== 'running') {
+      if (!this.browser || this.streaming() || this.state().status !== 'running' || this.researchState.isLoading()) {
         return
       }
 
@@ -158,17 +161,17 @@ export class ResearchApi {
     // loaded state is skipped, as the Artifact names were read along with it, and so is a reset, which leaves none.
     let seen: string | undefined
     effect(() => {
-      const step = this.step()
+      const key = this.stepKey()
 
-      if (step === undefined) {
+      if (key === undefined) {
         return
       }
 
-      if (seen !== undefined && step !== seen && this.state().status !== 'none') {
+      if (seen !== undefined && key !== seen && this.state().status !== 'none') {
         untracked(() => this.artifactNames.reload())
       }
 
-      seen = step
+      seen = key
     })
   }
 

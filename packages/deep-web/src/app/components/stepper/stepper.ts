@@ -39,7 +39,7 @@ export class Stepper {
     }))
   })
 
-  /** What the Research is waiting for or why it stopped, if anything. */
+  /** The user's turn to answer (Awaiting Answer), why the Research stopped, or that it Completed, if any of these. */
   protected readonly message = computed(() => {
     const state = this.state()
 

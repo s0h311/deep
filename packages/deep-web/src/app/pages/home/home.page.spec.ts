@@ -301,11 +301,14 @@ describe('HomePage', () => {
       const page = await renderPage({ state: { status: 'awaiting_answer' }, transcript: FIRST_QUESTION })
       stubStream()
 
-      send(page, 'Installers in cold climates')
+      send(page, '  Installers in cold climates\n')
 
       expect(fetch).toHaveBeenCalledWith(
         '/api/research',
-        expect.objectContaining({ method: 'POST', body: JSON.stringify({ message: 'Installers in cold climates' }) }),
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ message: '  Installers in cold climates\n' }),
+        }),
       )
     })
 
@@ -695,6 +698,30 @@ describe('HomePage', () => {
       await vi.advanceTimersByTimeAsync(10_000)
       TestBed.tick()
       http.expectNone({ method: 'GET', url: '/api/research' })
+    })
+
+    it('keeps showing the running Step and polling when a poll fails', async () => {
+      const page = await renderPage({ state: { status: 'running', step: 'draft', round: 1 } })
+      const http = TestBed.inject(HttpTestingController)
+
+      await vi.advanceTimersByTimeAsync(2000)
+      TestBed.tick()
+      http
+        .expectOne({ method: 'GET', url: '/api/research' })
+        .flush('', { status: 500, statusText: 'Internal Server Error' })
+      await vi.advanceTimersByTimeAsync(0)
+      TestBed.tick()
+
+      expect(currentStep(page)).toContain('Draft')
+      expect(page.textContent).not.toContain('What do you want to research?')
+
+      await vi.advanceTimersByTimeAsync(2000)
+      TestBed.tick()
+      http.expectOne({ method: 'GET', url: '/api/research' }).flush({ status: 'running', step: 'review', round: 1 })
+      await vi.advanceTimersByTimeAsync(0)
+      TestBed.tick()
+
+      expect(currentStep(page)).toContain('Review')
     })
 
     it('shows a Grilling question asked by a send this page did not start', async () => {
