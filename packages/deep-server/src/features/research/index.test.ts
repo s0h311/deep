@@ -9,22 +9,48 @@ import { defined } from '../../infrastructure/utils/utils.ts'
 
 type Finding = { statement: string; url: string; quote: string }
 
+type Draft = { summary: string; keyFacts: string[]; gaps: string[]; followUpQuestions: string[] }
+
+type Review = { verdict: 'pass' | 'fail'; offendingClaims: Array<{ claim: string; reason: string }> }
+
 const ecbFinding: Finding = {
   statement: 'The ECB kept its deposit facility rate at 2.00%.',
   url: 'https://www.ecb.europa.eu/press/pr/date/2025/html/ecb.mp250724.en.html',
   quote: 'the interest rates on the deposit facility [...] will remain unchanged at 2.00%',
 }
 
+const ecbDraft: Draft = {
+  summary: 'The ECB left its deposit facility rate unchanged at 2.00% in July 2025 [F1].',
+  keyFacts: ['The deposit facility rate stayed at 2.00% [F1].'],
+  gaps: ['How the Fed weighs inflation expectations.'],
+  followUpQuestions: ['How did the ECB rate path compare with the Fed?'],
+}
+
+const passingReview: Review = { verdict: 'pass', offendingClaims: [] }
+
 /**
- * Answers the Source Catalogue agent with the given hosts, the Retrieval agent with the given Findings, and every
- * other agent with the Grilling script.
+ * Answers the Source Catalogue agent with the given hosts, the Retrieval agent with the given Findings, the Draft and
+ * Review agents with the given Draft and Review, and every other agent with the Grilling script.
  */
 function researchModel(
   grilling: Script,
-  { sources = ['ecb.europa.eu'], findings = [ecbFinding] }: { sources?: string[]; findings?: Finding[] } = {},
+  {
+    sources = ['ecb.europa.eu'],
+    findings = [ecbFinding],
+    draft = ecbDraft,
+    review = () => passingReview,
+  }: { sources?: string[]; findings?: Finding[]; draft?: Draft; review?: () => Review } = {},
 ) {
   return scriptedChatModel((messages) => {
     const system = messages.find((message) => SystemMessage.isInstance(message))?.text ?? ''
+
+    if (system.includes('Draft Step')) {
+      return structuredResponse(draft)
+    }
+
+    if (system.includes('Review Step')) {
+      return structuredResponse(review())
+    }
 
     if (system.includes('Retrieval Step')) {
       return structuredResponse({ findings })
@@ -130,7 +156,7 @@ describe('Research', () => {
       expect(events.map((turn) => turn.at(-1))).toEqual([
         { type: 'step', step: 'awaiting_answer' },
         { type: 'step', step: 'awaiting_answer' },
-        { type: 'step', step: 'retrieval' },
+        { type: 'step', step: 'completed' },
       ])
       expect(await readdir(root)).toContain('central_bank_rate_setting_grilling_protocol.md')
       expect(await readdir(root)).not.toContain('grilling_transcript.json')
@@ -328,7 +354,7 @@ describe('Research', () => {
     test('once the Source Catalogue is written, Findings are written with IDs F1…Fn, each with statement, URL and quote', async () => {
       const { events, written } = await retrieve([ecbFinding, fedFinding])
 
-      expect(events).toEqual([
+      expect(events.slice(0, 3)).toEqual([
         { type: 'step', step: 'grilling' },
         { type: 'step', step: 'source_catalogue' },
         { type: 'step', step: 'retrieval' },
@@ -372,14 +398,118 @@ describe('Research', () => {
       expect(error).toBeInstanceOf(ResearchConflict)
       expect(error).toHaveProperty('message', expect.stringMatching(/reset first/))
     })
+  })
 
-    test('the Research stops once Findings are written', async () => {
+  describe('Draft and Review', () => {
+    const protocol = {
+      scope: 'The ECB, 2025',
+      goal: 'Understand the latest rate decision',
+      audience: 'Pension fund trustees',
+      openAssumptions: [],
+    }
+    const conclusion = structuredResponse({ done: true, topic: 'ECB rates', protocol })
+
+    test('a question goes through a multi-turn Grilling to a Completed Research with a Report', async () => {
+      const model = researchModel((messages) =>
+        messages.some((message) => HumanMessage.isInstance(message) && message.text.includes('Pension fund trustees'))
+          ? conclusion
+          : structuredResponse({ question: 'Who is the audience?', recommendedAnswer: 'Retail investors' }),
+      )
+      const research = createResearch({ model, root })
+      await send(research, 'What did the ECB decide on rates in July 2025?')
+
+      const events = await send(research, 'Pension fund trustees')
+
+      expect(events).toEqual([
+        { type: 'step', step: 'grilling' },
+        { type: 'step', step: 'source_catalogue' },
+        { type: 'step', step: 'retrieval' },
+        { type: 'step', step: 'draft', round: 1 },
+        { type: 'step', step: 'review', round: 1 },
+        { type: 'step', step: 'completed' },
+      ])
+      expect(await readFile(join(root, 'ecb_rates_report.md'), 'utf8')).toMatch(
+        /deposit facility rate unchanged at 2\.00% in July 2025 \[F1\][\s\S]*stayed at 2\.00% \[F1\][\s\S]*weighs inflation expectations[\s\S]*compare with the Fed\?/,
+      )
+    })
+
+    test('the Sources section lists only the cited Findings, grouped by host', async () => {
+      const finding = (url: string): Finding => ({ statement: `Stated at ${url}`, url, quote: 'Quoted.' })
+      const findings = [
+        finding('https://www.ecb.europa.eu/press/pr/date/2025/html/ecb.mp250724.en.html'),
+        finding('https://www.federalreserve.gov/newsevents/pressreleases/monetary20250730a.htm'),
+        finding('https://www.ecb.europa.eu/press/pr/date/2025/html/ecb.mp250605.en.html'),
+        finding('https://www.federalreserve.gov/monetarypolicy/openmarket.htm'),
+      ]
+      const model = researchModel(() => conclusion, {
+        sources: ['ecb.europa.eu', 'federalreserve.gov'],
+        findings,
+        draft: {
+          summary: 'The Fed held [F2]; the ECB held in July [F3] and in June [F1].',
+          keyFacts: ['Both central banks held their rates [F1, F2].'],
+          gaps: [],
+          followUpQuestions: [],
+        },
+      })
+
+      await send(createResearch({ model, root }), 'What did the ECB and the Fed decide in summer 2025?')
+
+      expect(await readFile(join(root, 'ecb_rates_draft_1.md'), 'utf8')).toMatch(
+        /## Sources\n\n### www\.ecb\.europa\.eu\n\n- \[F1\] https:\/\/www\.ecb\.europa\.eu\/press\/pr\/date\/2025\/html\/ecb\.mp250724\.en\.html\n- \[F3\] https:\/\/www\.ecb\.europa\.eu\/press\/pr\/date\/2025\/html\/ecb\.mp250605\.en\.html\n\n### www\.federalreserve\.gov\n\n- \[F2\] https:\/\/www\.federalreserve\.gov\/newsevents\/pressreleases\/monetary20250730a\.htm\n$/,
+      )
+    })
+
+    test.each([
+      { verdict: 'pass' as const, offendingClaims: [] },
+      {
+        verdict: 'fail' as const,
+        offendingClaims: [{ claim: 'The ECB cut rates in July 2025.', reason: 'F1 says the rates stayed unchanged.' }],
+      },
+    ])('the Review Artifact carries the verdict in front-matter: $verdict', async (response) => {
+      const model = researchModel(() => conclusion, { review: () => response })
+
+      await send(createResearch({ model, root }), 'What did the ECB decide on rates in July 2025?')
+
+      const written = await readFile(join(root, 'ecb_rates_review_1.md'), 'utf8')
+      expect(written).toMatch(new RegExp(`^---\\nverdict: ${response.verdict}\\n---\\n`))
+      for (const { claim, reason } of response.offendingClaims) {
+        expect(written).toContain(claim)
+        expect(written).toContain(reason)
+      }
+    })
+
+    test('a message to a Completed Research is rejected as a conflict: reset first', async () => {
       const research = createResearch({ model: researchModel(() => conclusion), root })
-      await send(research, 'How do central banks set interest rates?')
+      await send(research, 'What did the ECB decide on rates in July 2025?')
 
-      const events = await send(research, 'How do tides work?')
+      const error = await send(research, 'How do tides work?').catch((error: unknown) => error)
 
-      expect(events).toEqual([])
+      expect(error).toBeInstanceOf(ResearchConflict)
+      expect(error).toHaveProperty('message', expect.stringMatching(/reset first/))
+    })
+
+    test('a Draft without its Review is reviewed next, without drafting again', async () => {
+      let reviewed = false
+      const model = researchModel(() => conclusion, {
+        review: () => {
+          if (!reviewed) {
+            reviewed = true
+            throw new Error('overloaded')
+          }
+
+          return passingReview
+        },
+      })
+      const research = createResearch({ model, root })
+      await send(research, 'What did the ECB decide on rates in July 2025?').catch(() => {})
+
+      const events = await send(research, 'Go on')
+
+      expect(events).toEqual([
+        { type: 'step', step: 'review', round: 1 },
+        { type: 'step', step: 'completed' },
+      ])
+      expect(await readdir(root)).toContain('ecb_rates_report.md')
     })
   })
 })

@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { HumanMessage, SystemMessage } from '@langchain/core/messages'
-import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { runAgent } from '../../infrastructure/agent/client.ts'
 import { chatModel } from '../../infrastructure/agent/model.ts'
@@ -11,7 +11,8 @@ import { defined } from '../../infrastructure/utils/utils.ts'
 import { appSkill, researchDirectory } from './paths.ts'
 
 export type ResearchEvent =
-  | { type: 'step'; step: 'grilling' | 'awaiting_answer' | 'source_catalogue' | 'retrieval' }
+  | { type: 'step'; step: 'grilling' | 'awaiting_answer' | 'source_catalogue' | 'retrieval' | 'completed' }
+  | { type: 'step'; step: 'draft' | 'review'; round: number }
   | { type: 'step'; step: 'failed'; reason: string }
   | { type: 'text'; text: string }
 
@@ -39,6 +40,15 @@ type SourceCatalogue = z.infer<typeof sourceCatalogue>
 
 type Finding = z.infer<typeof finding>
 
+type Draft = z.infer<typeof draft>
+
+type Review = z.infer<typeof review>
+
+type Verdict = Review['verdict']
+
+/** One Draft followed by its Review, numbered from 1. */
+type Round = { topic: string; round: number }
+
 type GrillingTurn = { question: string; recommendedAnswer: string; answer?: string }
 
 /** Working file of the Grilling Step, kept until the Grilling Protocol exists. */
@@ -48,6 +58,7 @@ const GRILLING_TRANSCRIPT = 'grilling_transcript.json'
 const GRILLING_PROTOCOL_SUFFIX = '_grilling_protocol.md'
 const SOURCE_CATALOGUE_SUFFIX = '_source_catalogue.json'
 const FINDINGS_SUFFIX = '_findings.md'
+const REPORT_SUFFIX = '_report.md'
 /** The heading of the first Finding; a Findings file without it has no entries. */
 const FIRST_FINDING = /^## F1$/m
 const MAX_TOPIC_SLUG_LENGTH = 50
@@ -97,6 +108,25 @@ const retrieval = z.object({
   findings: z.array(finding).describe('Every Finding you gathered, each from a host in the Source Catalogue.'),
 })
 
+const draft = z.object({
+  summary: z.string().describe('A short answer to the Research question, citing Findings inline as [Fn].'),
+  keyFacts: z.array(z.string()).describe('The key facts, each citing the Findings backing it inline as [Fn].'),
+  gaps: z.array(z.string()).describe('What the Research wanted to know but no Finding backs.'),
+  followUpQuestions: z.array(z.string()).describe('Questions worth researching next.'),
+})
+
+const review = z.object({
+  verdict: z.enum(['pass', 'fail']).describe('pass only if every Claim cites a Finding that supports it.'),
+  offendingClaims: z
+    .array(
+      z.object({
+        claim: z.string().describe('The Claim, quoted from the Draft.'),
+        reason: z.string().describe('Why it fails: no citation, or a cited Finding that does not support it.'),
+      }),
+    )
+    .describe('Every Claim that fails; empty on pass.'),
+})
+
 const GRILLING_SYSTEM_PROMPT = `You run the Grilling Step of a Research: interview the researcher about the scope, goal and audience of their Research, following the grilling skill.
 You are given the researcher's question and the interview so far. Respond with either your next question and your recommended answer to it, or, once scope, goal and audience are settled, conclude with a Topic and the Grilling Protocol.`
 
@@ -105,6 +135,12 @@ You are given the Grilling Protocol of the Research. Search the web as much as y
 
 const RETRIEVAL_SYSTEM_PROMPT = `You run the Retrieval Step of a Research: gather raw, quoted Findings from its Primary Sources, following the retrieval skill.
 You are given the Grilling Protocol and the Source Catalogue of the Research. Search and read only the hosts in the Source Catalogue, then respond with every Finding you gathered.`
+
+const DRAFT_SYSTEM_PROMPT = `You run the Draft Step of a Research: write the Report from its Findings, following the draft skill.
+You are given the Grilling Protocol and the Findings of the Research. Respond with the summary, key facts, Gaps and follow-up questions, citing the Finding behind every Claim inline as [Fn].`
+
+const REVIEW_SYSTEM_PROMPT = `You run the Review Step of a Research: check that every Claim in a Draft cites a Finding that supports it, following the review skill.
+You are given the Draft and the Findings of the Research. Respond with your verdict and every offending Claim.`
 
 const NO_PRIMARY_SOURCES = 'No Primary Source could be identified for the Research.'
 const NO_FINDINGS = 'Retrieval found no Findings on the Primary Sources of the Research.'
@@ -115,14 +151,27 @@ const MAX_GRILLING_QUESTIONS = 5
 const CONCLUDE_INSTRUCTION = `You have asked ${MAX_GRILLING_QUESTIONS} questions, the maximum. Conclude now with a Topic and the Grilling Protocol, recording every unresolved point as an open assumption.`
 
 /**
- * Grilling asks one question, then concludes once it is answered; the Source Catalogue lists two central banks, and
- * Retrieval finds one Finding on each.
+ * Grilling asks one question, then concludes once it is answered; the Source Catalogue lists two central banks,
+ * Retrieval finds one Finding on each, and the Draft citing both passes Review.
  */
 const fakeScript: Script = (messages) => {
   const system = messages.find((message) => SystemMessage.isInstance(message))?.text ?? ''
 
   if (system.includes(SOURCE_CATALOGUE_SYSTEM_PROMPT)) {
     return structuredResponse({ sources: ['ecb.europa.eu', 'federalreserve.gov'] })
+  }
+
+  if (system.includes(DRAFT_SYSTEM_PROMPT)) {
+    return structuredResponse({
+      summary: 'The ECB [F1] and the Fed [F2] each set their own policy rates.',
+      keyFacts: ['The ECB sets three key interest rates for the euro area [F1].'],
+      gaps: ['How the two central banks coordinate, if at all.'],
+      followUpQuestions: ['How have both policy rates moved since 2020?'],
+    })
+  }
+
+  if (system.includes(REVIEW_SYSTEM_PROMPT)) {
+    return structuredResponse({ verdict: 'pass', offendingClaims: [] })
   }
 
   if (system.includes(RETRIEVAL_SYSTEM_PROMPT)) {
@@ -257,6 +306,42 @@ export function createResearch({
     return valid.length > 0
   }
 
+  /** Runs the Draft Step of the Round. */
+  async function writeDraft({ topic, round }: Round, emit: Emit): Promise<void> {
+    await emit({ type: 'step', step: 'draft', round })
+
+    const findings = await readFile(join(root, `${topic}${FINDINGS_SUFFIX}`), 'utf8')
+    const response = await runAgent({
+      model,
+      systemPrompt: DRAFT_SYSTEM_PROMPT,
+      message: [await readFile(join(root, `${topic}${GRILLING_PROTOCOL_SUFFIX}`), 'utf8'), findings].join('\n\n'),
+      responseFormat: draft,
+      skill: appSkill('draft'),
+    })
+
+    await writeFile(join(root, draftName(topic, round)), renderDraft(response, parseFindingUrls(findings)))
+  }
+
+  /** Runs the Review Step of the Round, returning its verdict. */
+  async function reviewDraft({ topic, round }: Round, emit: Emit): Promise<Verdict> {
+    await emit({ type: 'step', step: 'review', round })
+
+    const response = await runAgent({
+      model,
+      systemPrompt: REVIEW_SYSTEM_PROMPT,
+      message: [
+        await readFile(join(root, draftName(topic, round)), 'utf8'),
+        await readFile(join(root, `${topic}${FINDINGS_SUFFIX}`), 'utf8'),
+      ].join('\n\n'),
+      responseFormat: review,
+      skill: appSkill('review'),
+    })
+
+    await writeFile(join(root, reviewName(topic, round)), renderReview(response, round))
+
+    return response.verdict
+  }
+
   async function hasFindings(topic: string): Promise<boolean> {
     return FIRST_FINDING.test(await readFile(join(root, `${topic}${FINDINGS_SUFFIX}`), 'utf8'))
   }
@@ -329,9 +414,108 @@ export function createResearch({
         throw new ResearchConflict(RESET_FIRST)
       }
 
-      // Until the Draft Step exists, the Research stops once the Findings are written.
+      if (names.includes(`${topic}${REPORT_SUFFIX}`)) {
+        throw new ResearchConflict(RESET_FIRST)
+      }
+
+      if (!names.some((name) => name.startsWith(`${topic}_draft_`))) {
+        await writeDraft({ topic, round: 1 }, emit)
+      }
+
+      if ((await reviewDraft({ topic, round: 1 }, emit)) === 'pass') {
+        await copyFile(join(root, draftName(topic, 1)), join(root, `${topic}${REPORT_SUFFIX}`))
+        await emit({ type: 'step', step: 'completed' })
+      }
+
+      // Until failing Rounds are handled, the Research stops after a failed Review.
     },
   }
+}
+
+function draftName(topic: string, round: number): string {
+  return `${topic}_draft_${round}.md`
+}
+
+function reviewName(topic: string, round: number): string {
+  return `${topic}_review_${round}.md`
+}
+
+/** The URL of each Finding in a rendered Findings file, by its ID. */
+function parseFindingUrls(findings: string): Map<string, string> {
+  return new Map(
+    findings
+      .split(/^## /m)
+      .slice(1)
+      .flatMap((entry) => {
+        const id = entry.match(/^F\d+$/m)?.[0]
+        const url = entry.match(/^URL: (.+)$/m)?.[1]
+
+        return id && url ? [[id, url] as const] : []
+      }),
+  )
+}
+
+/** The Draft with a Sources section listing only the Findings it cites, grouped by host. */
+function renderDraft({ summary, keyFacts, gaps, followUpQuestions }: Draft, findingUrls: Map<string, string>): string {
+  const list = (items: string[]) => (items.length ? items.map((item) => `- ${item}`).join('\n') : 'None.')
+
+  return `# Report
+
+## Summary
+
+${summary}
+
+## Key facts
+
+${list(keyFacts)}
+
+## Gaps
+
+${list(gaps)}
+
+## Follow-up questions
+
+${list(followUpQuestions)}
+
+## Sources
+
+${renderSources([summary, ...keyFacts, ...gaps, ...followUpQuestions].join('\n'), findingUrls)}
+`
+}
+
+/** The cited Findings' URLs grouped by host, hosts in order of first citation; citations of unknown IDs are ignored. */
+function renderSources(text: string, findingUrls: Map<string, string>): string {
+  const cited = [
+    ...new Set([...text.matchAll(/\[(F\d+(?:\s*,\s*F\d+)*)\]/g)].flatMap(([, ids]) => ids.split(/\s*,\s*/))),
+  ]
+    .filter((id) => findingUrls.has(id))
+    .toSorted((a, b) => Number(a.slice(1)) - Number(b.slice(1)))
+  const byHost = Map.groupBy(cited, (id) => new URL(defined(findingUrls.get(id))).hostname)
+
+  if (!byHost.size) {
+    return 'None.'
+  }
+
+  return [...byHost]
+    .map(([host, ids]) => `### ${host}\n\n${ids.map((id) => `- [${id}] ${findingUrls.get(id)}`).join('\n')}`)
+    .join('\n\n')
+}
+
+function renderReview({ verdict, offendingClaims }: Review, round: number): string {
+  const offending = offendingClaims.length
+    ? offendingClaims.map(({ claim, reason }) => `- ${claim}\n  - ${reason}`).join('\n')
+    : 'None.'
+
+  return `---
+verdict: ${verdict}
+---
+
+# Review ${round}
+
+## Offending Claims
+
+${offending}
+`
 }
 
 function renderTranscript({ question, turns }: GrillingTranscript): string {
