@@ -1,0 +1,21 @@
+@if (entries(); as entries) {
+<ul class="space-y-1">
+  @for (entry of entries; track entry.source) {
+  <li class="rounded-lg px-3 py-2 font-mono text-sm">
+    @if (entry.href) {
+    <a
+      class="text-accent hover:underline"
+      target="_blank"
+      rel="noopener noreferrer"
+      [href]="entry.href"
+      >{{ entry.source }}</a
+    >
+    } @else { {{ entry.source }} }
+  </li>
+  } @empty {
+  <li class="px-3 py-2 text-sm text-muted">The Source Catalogue is empty.</li>
+  }
+</ul>
+} @else {
+<p class="px-3 py-2 text-sm text-muted">No Source Catalogue yet.</p>
+}

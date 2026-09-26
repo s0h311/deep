@@ -1,0 +1,22 @@
+<ul class="space-y-1">
+  @for (artifact of artifacts(); track artifact.name) {
+  <li>
+    <button
+      type="button"
+      class="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-surface"
+      (click)="opened.emit(artifact.name)"
+    >
+      <span>{{ artifact.label }}</span>
+      @if (artifact.verdict) {
+      <span
+        class="rounded-full px-2 text-xs font-medium"
+        [class]="artifact.verdict === 'pass' ? 'bg-accent text-white' : 'border border-line text-muted'"
+        >{{ artifact.verdict === 'pass' ? 'Pass' : 'Fail' }}</span
+      >
+      }
+    </button>
+  </li>
+  } @empty {
+  <li class="px-3 py-2 text-sm text-muted">No Artifacts yet.</li>
+  }
+</ul>

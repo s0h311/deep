@@ -21,3 +21,39 @@
 body {
   @apply bg-bg font-sans text-fg antialiased;
 }
+
+/* Artifacts rendered from Markdown: Tailwind's preflight leaves their elements unstyled. */
+.markdown {
+  @apply space-y-3 text-sm leading-relaxed;
+
+  h1 {
+    @apply text-xl font-semibold;
+  }
+  h2 {
+    @apply pt-3 text-lg font-semibold;
+  }
+  h3 {
+    @apply pt-2 font-semibold;
+  }
+  ul {
+    @apply list-disc space-y-1 pl-5;
+  }
+  ol {
+    @apply list-decimal space-y-1 pl-5;
+  }
+  a {
+    @apply text-accent hover:underline;
+  }
+  blockquote {
+    @apply border-l-2 border-line pl-3 text-muted;
+  }
+  code {
+    @apply font-mono text-xs;
+  }
+  pre {
+    @apply overflow-x-auto rounded-md bg-surface p-3;
+  }
+  hr {
+    @apply border-line;
+  }
+}

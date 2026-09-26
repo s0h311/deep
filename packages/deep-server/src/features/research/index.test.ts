@@ -158,7 +158,7 @@ describe('Research', () => {
       return messages.some((message) => HumanMessage.isInstance(message) && message.text.includes(answer))
     }
 
-    test('a multi-turn Grilling ends in a Grilling Protocol named after the Topic', async () => {
+    test('a multi-turn Grilling ends in a Grilling Protocol named after the Topic, keeping the Grilling Transcript', async () => {
       const model = researchModel((messages) => {
         if (answered(messages, 'The ECB and the Fed')) {
           return structuredResponse({ done: true, topic: 'Central bank rate setting', protocol })
@@ -183,8 +183,16 @@ describe('Research', () => {
         { type: 'step', step: 'awaiting_answer' },
         { type: 'step', step: 'completed' },
       ])
-      expect(await readdir(root)).toContain('central_bank_rate_setting_grilling_protocol.md')
-      expect(await readdir(root)).not.toContain('grilling_transcript.json')
+      expect(await research.listArtifacts()).toEqual(
+        expect.arrayContaining(['central_bank_rate_setting_grilling_protocol.md', 'grilling_transcript.json']),
+      )
+      expect(JSON.parse(await research.readArtifact('grilling_transcript.json'))).toEqual({
+        question: 'How do central banks set interest rates?',
+        turns: [
+          { question: 'Who is the audience?', recommendedAnswer: 'Retail investors', answer: 'Pension fund trustees' },
+          { question: 'Which central banks?', recommendedAnswer: 'The ECB and the Fed', answer: 'The ECB and the Fed' },
+        ],
+      })
       expect(await readFile(join(root, 'central_bank_rate_setting_grilling_protocol.md'), 'utf8')).toMatch(
         /How do central banks set interest rates\?[\s\S]*The ECB and the Fed, 2015 to 2025[\s\S]*Understand how policy rates are decided[\s\S]*Pension fund trustees/,
       )
@@ -903,6 +911,99 @@ describe('Research', () => {
         { type: 'step', step: 'awaiting_answer' },
       ])
       expect(await research.listArtifacts()).toEqual(['grilling_transcript.json'])
+    })
+  })
+
+  describe('State', () => {
+    const conclusion = structuredResponse({
+      done: true,
+      topic: 'ECB rates',
+      protocol: {
+        scope: 'The ECB, 2025',
+        goal: 'Understand the latest rate decision',
+        audience: 'Pension fund trustees',
+        openAssumptions: [],
+      },
+    })
+
+    test('before the first message there is no Research', async () => {
+      expect(await createResearch({ root }).state()).toEqual({ status: 'none' })
+    })
+
+    test('after a Grilling question the Research is Awaiting Answer', async () => {
+      const model = scriptedChatModel(() =>
+        structuredResponse({ question: 'Who is the audience?', recommendedAnswer: 'Retail investors' }),
+      )
+      const research = createResearch({ model, root })
+
+      await send(research, 'How do central banks set interest rates?')
+
+      expect(await research.state()).toEqual({ status: 'awaiting_answer' })
+    })
+
+    test('while a send is in flight the Research is Running, with the Step and Round it last announced', async () => {
+      const research = createResearch({ model: researchModel(() => conclusion), root })
+      const states: unknown[] = []
+
+      await research.send('What did the ECB decide on rates in July 2025?', async (event) => {
+        if (event.type === 'step' && (event.step === 'source_catalogue' || event.step === 'review')) {
+          states.push(await research.state())
+        }
+      })
+
+      expect(states).toEqual([
+        { status: 'running', step: 'source_catalogue' },
+        { status: 'running', step: 'review', round: 1 },
+      ])
+    })
+
+    test('after a Step fails every attempt the Research is Interrupted at that Step, with the reason', async () => {
+      const research = createResearch({ model: researchModel(() => conclusion, { draft: flaky(2, ecbDraft) }), root })
+
+      await send(research, 'What did the ECB decide on rates in July 2025?')
+
+      expect(await research.state()).toEqual({
+        status: 'interrupted',
+        step: 'draft',
+        round: 1,
+        reason: expect.stringMatching(/Draft[\s\S]*overloaded/),
+      })
+    })
+
+    test('after a restart a Research with unfinished Artifacts is Interrupted at its next Step, with no reason', async () => {
+      const model = researchModel(() => conclusion, { draft: flaky(2, ecbDraft) })
+      await send(createResearch({ model, root }), 'What did the ECB decide on rates in July 2025?')
+
+      expect(await createResearch({ model, root }).state()).toEqual({ status: 'interrupted', step: 'draft', round: 1 })
+    })
+
+    test.each([
+      { cause: 'no Primary Sources', options: { sources: [] }, reason: /Primary Source/ },
+      { cause: 'no Findings', options: { findings: [] }, reason: /no Findings/ },
+      { cause: 'every Round failing Review', options: { review: () => failingReview }, reason: /Review/ },
+    ])('after $cause the Research is Failed, with the reason', async ({ options, reason }) => {
+      const research = createResearch({ model: researchModel(() => conclusion, options), root })
+
+      await send(research, 'What did the ECB decide on rates in July 2025?')
+
+      expect(await research.state()).toEqual({ status: 'failed', reason: expect.stringMatching(reason) })
+    })
+
+    test('once the Report is published the Research is Completed', async () => {
+      const research = createResearch({ model: researchModel(() => conclusion), root })
+
+      await send(research, 'What did the ECB decide on rates in July 2025?')
+
+      expect(await research.state()).toEqual({ status: 'completed' })
+    })
+
+    test('after a reset there is no Research', async () => {
+      const research = createResearch({ model: researchModel(() => conclusion, { draft: flaky(2, ecbDraft) }), root })
+      await send(research, 'What did the ECB decide on rates in July 2025?')
+
+      await research.reset()
+
+      expect(await research.state()).toEqual({ status: 'none' })
     })
   })
 })
