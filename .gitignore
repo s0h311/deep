@@ -13,3 +13,5 @@ dist
 
 packages/deep-web/.angular/cache
 .research
+
+.matrix/
