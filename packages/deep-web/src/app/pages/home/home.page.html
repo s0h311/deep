@@ -1,98 +1,173 @@
-<main class="mx-auto grid max-w-7xl grid-cols-1 gap-6 p-6 lg:grid-cols-[16rem_minmax(0,1fr)_18rem]">
-  <aside class="space-y-6">
-    <app-stepper [state]="research.state()" />
-    <div class="flex gap-2">
-      @if (research.state().status === 'interrupted') {
-      <button
-        type="button"
-        class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
-        [disabled]="research.busy()"
-        (click)="resume()"
-      >
-        Resume
-      </button>
-      }
-      <button
-        type="button"
-        class="rounded-md border border-line px-3 py-1.5 text-sm font-medium hover:bg-surface"
-        (click)="confirmingReset.set(true)"
-      >
-        Reset
-      </button>
-    </div>
-    @if (confirmingReset()) {
-    <div
-      role="alertdialog"
-      aria-labelledby="reset-warning"
-      class="rounded-md border border-accent bg-accent-soft p-3 text-sm"
+@let status = research.state().status;
+<div class="flex h-dvh flex-col bg-surface">
+  <header class="grid h-14 shrink-0 grid-cols-[auto_1fr_auto] items-center gap-4 px-4 sm:px-6">
+    <span class="flex items-center gap-2 font-semibold tracking-tight">
+      <span class="size-2.5 rounded-full bg-accent"></span>deep
+    </span>
+    @if (status !== 'none') {
+    <app-stepper
+      class="flex justify-center"
+      [state]="research.state()"
+    />
+    <button
+      type="button"
+      class="rounded-lg px-3 py-1.5 text-sm font-medium text-muted hover:bg-bg hover:text-fg"
+      (click)="confirmingReset.set(true)"
     >
-      <p id="reset-warning">This deletes every Artifact.</p>
-      <div class="mt-3 flex gap-2">
+      New research
+    </button>
+    }
+  </header>
+
+  <div class="flex min-h-0 flex-1 flex-col overflow-y-auto lg:flex-row lg:overflow-hidden">
+    <main class="flex-1 lg:overflow-y-auto">
+      @if (status === 'none') {
+      <div class="flex h-full min-h-64 items-center justify-center px-4">
+        <h1 class="text-2xl font-semibold tracking-tight">What do you want to research?</h1>
+      </div>
+      } @else if (research.openedMarkdown(); as markdown) {
+      <div class="mx-auto w-full max-w-3xl px-4 py-6">
         <button
           type="button"
-          class="rounded-md bg-accent px-3 py-1.5 font-medium text-white"
-          (click)="reset()"
+          class="mb-4 rounded-lg px-2 py-1 text-sm text-muted hover:bg-bg hover:text-fg"
+          (click)="research.close()"
         >
-          Delete
+          Back to the chat
         </button>
+        <div class="rounded-2xl bg-bg p-6 shadow-sm">
+          <app-markdown-view
+            [markdown]="markdown"
+            [citations]="research.opened()?.kind === 'draft' || research.opened()?.kind === 'report'"
+            [finding]="research.opened()?.finding"
+            (citationFollowed)="research.openFinding($event)"
+          />
+        </div>
+      </div>
+      } @else {
+      <div class="mx-auto flex w-full max-w-2xl flex-col gap-4 px-4 py-6">
+        @if (research.grillingTranscript(); as transcript) {
+        <app-grilling-thread
+          [transcript]="transcript"
+          [answerable]="status === 'awaiting_answer'"
+          [disabled]="research.busy()"
+          (recommendationUsed)="send($event)"
+        />
+        } @if (outcome(); as outcome) {
+        <div
+          role="status"
+          class="rounded-2xl bg-bg p-4 text-sm shadow-sm"
+        >
+          <p class="font-medium">{{ outcome.title }}</p>
+          <p class="mt-1 text-muted">{{ outcome.reason }}</p>
+          @if (outcome.resumable) {
+          <button
+            type="button"
+            class="mt-3 rounded-lg bg-accent px-4 py-1.5 font-medium text-white disabled:opacity-50"
+            [disabled]="research.busy()"
+            (click)="resume()"
+          >
+            Resume
+          </button>
+          }
+        </div>
+        }
+      </div>
+      }
+    </main>
+    @if (status !== 'none') {
+    <!-- Temporary: the Artifacts and Sources drawer replaces this column. -->
+    <aside
+      class="space-y-6 border-t border-line bg-bg p-4 lg:w-72 lg:shrink-0 lg:overflow-y-auto lg:border-t-0 lg:border-l"
+    >
+      <app-artifact-list
+        [artifacts]="research.artifactList()"
+        [selected]="research.opened()?.name"
+        (opened)="research.open($event)"
+      />
+      <app-source-catalogue-panel [sources]="research.sources()" />
+    </aside>
+    }
+  </div>
+
+  @if (messageable() || status === 'completed' || status === 'failed') {
+  <footer class="shrink-0 px-4 pt-2 pb-5">
+    <div class="mx-auto w-full max-w-2xl">
+      @if (messageable()) {
+      <form
+        class="flex items-end gap-2 rounded-2xl bg-bg p-2 pl-4 shadow-md ring-1 ring-line"
+        (submit)="sendTyped($event)"
+      >
+        <textarea
+          name="message"
+          rows="1"
+          aria-label="Message"
+          class="field-sizing-content max-h-40 min-h-9 min-w-0 flex-1 resize-none bg-transparent py-1.5 text-sm outline-none placeholder:text-muted disabled:text-muted"
+          [placeholder]="placeholder()"
+          [value]="message()"
+          [disabled]="research.busy()"
+          (input)="message.set($any($event.target).value)"
+          (keydown)="keydown($event)"
+        ></textarea>
+        <button
+          type="submit"
+          class="rounded-xl bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-40"
+          [disabled]="research.busy()"
+        >
+          Send
+        </button>
+      </form>
+      } @else {
+      <div class="flex justify-center">
         <button
           type="button"
-          class="rounded-md border border-line bg-bg px-3 py-1.5 font-medium"
-          (click)="confirmingReset.set(false)"
+          class="rounded-xl bg-bg px-4 py-2 text-sm font-medium shadow-sm ring-1 ring-line hover:ring-accent/50"
+          (click)="confirmingReset.set(true)"
         >
-          Cancel
+          New research
         </button>
       </div>
+      }
     </div>
-    }
-    <app-artifact-list
-      [artifacts]="research.artifactList()"
-      [selected]="research.opened()?.name"
-      (opened)="research.open($event)"
-    />
-  </aside>
-  <section class="flex min-h-64 flex-col gap-4 rounded-lg border border-line bg-elevated p-6">
-    @if (research.state().status === 'none') {
-    <h1 class="text-xl font-semibold">What do you want to research?</h1>
-    } @else if (research.openedMarkdown(); as markdown) {
-    <app-markdown-view
-      [markdown]="markdown"
-      [citations]="research.opened()?.kind === 'draft' || research.opened()?.kind === 'report'"
-      [finding]="research.opened()?.finding"
-      (citationFollowed)="research.openFinding($event)"
-    />
-    } @else if (research.grillingTranscript(); as transcript) {
-    <app-grilling-thread
-      [transcript]="transcript"
-      [answerable]="research.state().status === 'awaiting_answer'"
-      [disabled]="research.busy()"
-      (recommendationUsed)="send($event)"
-    />
-    } @if (messageable()) {
-    <form
-      class="mt-auto flex items-end gap-2"
-      (submit)="sendTyped($event)"
+  </footer>
+  }
+</div>
+
+@if (confirmingReset()) {
+<div class="fixed inset-0 z-40 flex items-center justify-center bg-fg/30 px-4">
+  <div
+    role="alertdialog"
+    aria-labelledby="reset-title"
+    aria-describedby="reset-warning"
+    class="w-full max-w-sm rounded-2xl bg-bg p-5 shadow-2xl"
+  >
+    <p
+      id="reset-title"
+      class="font-medium"
     >
-      <textarea
-        name="message"
-        rows="2"
-        aria-label="Message"
-        class="min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none disabled:bg-surface disabled:text-muted"
-        [value]="message()"
-        [disabled]="research.busy()"
-        (input)="message.set($any($event.target).value)"
-      ></textarea>
+      Start a new research?
+    </p>
+    <p
+      id="reset-warning"
+      class="mt-1 text-sm text-muted"
+    >
+      This deletes every Artifact.
+    </p>
+    <div class="mt-5 flex justify-end gap-2">
       <button
-        type="submit"
-        class="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-        [disabled]="research.busy()"
+        type="button"
+        class="rounded-lg border border-line px-4 py-1.5 text-sm font-medium"
+        (click)="confirmingReset.set(false)"
       >
-        Send
+        Cancel
       </button>
-    </form>
-    }
-  </section>
-  <aside class="rounded-lg border border-line bg-surface p-4">
-    <app-source-catalogue-panel [sources]="research.sources()" />
-  </aside>
-</main>
+      <button
+        type="button"
+        class="rounded-lg bg-accent px-4 py-1.5 text-sm font-medium text-white"
+        (click)="reset()"
+      >
+        Delete and start over
+      </button>
+    </div>
+  </div>
+</div>
+}

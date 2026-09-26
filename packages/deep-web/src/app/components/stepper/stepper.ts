@@ -15,7 +15,7 @@ const STEPS: { step: Step; label: string }[] = [
 /** Where a Step stands, as a screen reader announces it. */
 type Progress = 'Done' | 'Running' | 'Current' | 'Upcoming'
 
-/** The Research's Steps in order, marking each as done, current or upcoming. */
+/** The Research's Steps in order, marking each as done, current or upcoming; on a narrow screen, dots and the current Step. */
 @Component({
   selector: 'app-stepper',
   templateUrl: 'stepper.html',
@@ -30,7 +30,7 @@ export class Stepper {
       index: state.status === 'completed' ? STEPS.length : STEPS.findIndex(({ step }) => step === currentStep(state)),
       running: state.status === 'running',
     }
-    const round = 'round' in state ? `Round ${state.round} / ${MAX_ROUNDS}` : undefined
+    const round = 'round' in state ? `${state.round}/${MAX_ROUNDS}` : undefined
 
     return STEPS.map(({ label }, index) => ({
       label,
@@ -39,23 +39,15 @@ export class Stepper {
     }))
   })
 
-  /** The user's turn to answer (Awaiting Answer), why the Research stopped, or that it Completed, if any of these. */
-  protected readonly message = computed(() => {
-    const state = this.state()
+  /** The current Step with its Round, or that the Research Completed: all the stepper shows on a narrow screen. */
+  protected readonly summary = computed(() => {
+    const current = this.steps().find(({ progress }) => progress === 'Current' || progress === 'Running')
 
-    switch (state.status) {
-      case 'awaiting_answer':
-        return 'Your turn: answer the Grilling question.'
-      case 'interrupted':
-        // The reason lives in the server's memory only, so it is gone after a restart.
-        return state.reason ?? 'The Research was interrupted.'
-      case 'failed':
-        return state.reason
-      case 'completed':
-        return 'Completed: the Report is ready.'
-      default:
-        return undefined
+    if (current) {
+      return current.round ? `${current.label} · ${current.round}` : current.label
     }
+
+    return this.state().status === 'completed' ? 'Completed' : undefined
   })
 }
 

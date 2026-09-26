@@ -1,35 +1,63 @@
-<ol class="space-y-1">
+<ol
+  class="hidden items-center gap-2 md:flex"
+  aria-label="Steps"
+>
   @for (step of steps(); track step.label) { @let current = step.progress === 'Current' || step.progress === 'Running';
   <li
-    class="flex items-center gap-3 rounded-md px-3 py-2 text-sm"
-    [class.bg-accent-soft]="current"
+    class="flex items-center gap-2"
     [attr.aria-current]="current ? 'step' : null"
   >
     <span
-      class="flex size-5 shrink-0 items-center justify-center rounded-full border text-xs"
+      class="flex size-5 shrink-0 items-center justify-center rounded-full text-[10px]"
       [class]="
-          step.progress === 'Done'
-            ? 'border-accent bg-accent text-white'
-            : current
-              ? 'border-accent text-accent'
-              : 'border-line text-muted'
-        "
+        step.progress === 'Done'
+          ? 'bg-accent text-white'
+          : current
+            ? 'border-2 border-accent bg-bg'
+            : 'border border-line bg-bg'
+      "
       aria-hidden="true"
     >
       @if (step.progress === 'Done') { ✓ } @else if (step.progress === 'Running') {
-      <span class="size-2 animate-pulse rounded-full bg-accent"></span>
+      <span class="size-1.5 animate-pulse rounded-full bg-accent"></span>
       }
     </span>
-    <span class="flex flex-col">
-      <span [class]="step.progress === 'Upcoming' ? 'text-muted' : 'font-medium'">{{ step.label }}</span>
-      @if (step.round) {
-      <span class="text-xs text-muted">{{ step.round }}</span>
-      }
+    <span
+      class="text-xs whitespace-nowrap"
+      [class]="step.progress === 'Upcoming' ? 'text-muted' : current ? 'font-semibold' : ''"
+    >
+      {{ step.label }}@if (step.round) {<span class="font-normal text-muted"> · {{ step.round }}</span>}
     </span>
     <span class="sr-only">{{ step.progress }}</span>
   </li>
-  }
+  @if (!$last) {
+  <span
+    class="h-px w-5 shrink-0"
+    [class]="step.progress === 'Done' ? 'bg-accent' : 'bg-line'"
+    aria-hidden="true"
+  ></span>
+  } }
 </ol>
-@if (message()) {
-<p class="mt-3 rounded-md border border-line bg-surface px-3 py-2 text-sm">{{ message() }}</p>
-}
+<p class="flex items-center gap-2 md:hidden">
+  <span
+    class="flex gap-1"
+    aria-hidden="true"
+  >
+    @for (step of steps(); track step.label) {
+    <span
+      data-dot
+      class="size-1.5 rounded-full"
+      [class]="
+        step.progress === 'Done'
+          ? 'bg-accent'
+          : step.progress === 'Running'
+            ? 'animate-pulse bg-accent/50'
+            : step.progress === 'Current'
+              ? 'bg-accent/50'
+              : 'bg-line'
+      "
+    ></span>
+    }
+  </span>
+  <span class="text-xs font-medium">{{ summary() }}</span>
+</p>

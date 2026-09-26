@@ -33,15 +33,10 @@ type ResearchEvent =
 export class ResearchApi {
   private readonly researchState = httpResource<ResearchState>(() => '/api/research')
   private readonly artifactNames = httpResource<string[]>(() => '/api/research/artifacts')
-  /** Whether the Research is in the Grilling Step, so the Grilling Transcript holds its chat thread. */
-  private readonly grilling = computed(() => inGrilling(this.state()))
-  /** Whether the chat thread shows: during Grilling, or when the user opens the Grilling Transcript after it. */
-  private readonly threadShown = computed(() => {
-    const opened = this.opened()
-    return opened ? opened.kind === 'grilling_transcript' : this.grilling()
-  })
+  /** Whether there is a Research, and so a Grilling Transcript that holds its chat thread. */
+  private readonly started = computed(() => this.state().status !== 'none')
   private readonly transcript = httpResource<GrillingTranscript>(() =>
-    this.threadShown() ? artifactUrl(GRILLING_TRANSCRIPT) : undefined,
+    this.started() ? artifactUrl(GRILLING_TRANSCRIPT) : undefined,
   )
   private readonly catalogueName = computed(() => this.ordered().find(({ kind }) => kind === 'source_catalogue')?.name)
   private readonly catalogue = httpResource<SourceCatalogue>(() => {
@@ -130,7 +125,7 @@ export class ResearchApi {
     const content = this.content.value()
     return name.endsWith('.json') ? `\`\`\`json\n${content.trimEnd()}\n\`\`\`` : content.replace(FRONT_MATTER, '')
   })
-  /** The Grilling interview while the Research is in the Grilling Step, or once the user opens it. */
+  /** The Grilling interview of the whole Research, once read. */
   readonly grillingTranscript = computed(() => (this.transcript.hasValue() ? this.transcript.value() : undefined))
   /** The Source Catalogue's Sources, once its Step has written it. */
   readonly sources = computed(() => (this.catalogue.hasValue() ? this.catalogue.value().sources : undefined))
@@ -178,6 +173,11 @@ export class ResearchApi {
   /** Opens the Artifact with the given name. */
   open(name: string): void {
     this.selection.set({ name })
+  }
+
+  /** Closes the open Artifact, going back to the chat thread. */
+  close(): void {
+    this.selection.set(undefined)
   }
 
   /** Opens the Findings scrolled to the Finding with the given ID. */
@@ -281,10 +281,6 @@ function answered(transcript: GrillingTranscript, answer: string): GrillingTrans
   return last && last.answer === undefined
     ? { ...transcript, turns: [...transcript.turns.slice(0, -1), { ...last, answer }] }
     : transcript
-}
-
-function inGrilling(state: ResearchState): boolean {
-  return state.status === 'awaiting_answer' || ('step' in state && state.step === 'grilling')
 }
 
 /** The state a streamed Step puts the Research in. */

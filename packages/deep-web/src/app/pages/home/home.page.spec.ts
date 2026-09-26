@@ -109,18 +109,34 @@ async function settle(): Promise<void> {
   TestBed.tick()
 }
 
-/** Types a message into the message input and sends it. */
-function send(page: HTMLElement, message: string): void {
-  const input = page.querySelector<HTMLTextAreaElement>('textarea[name="message"]')
-  const button = page.querySelector<HTMLButtonElement>('button[type="submit"]')
+/** The message input, if the page shows one. */
+function messageInput(page: HTMLElement): HTMLTextAreaElement | null {
+  return page.querySelector<HTMLTextAreaElement>('textarea[name="message"]')
+}
 
-  if (!input || !button) {
+/** What the page offers below the thread in place of a message input, as its text: empty if nothing. */
+function composer(page: HTMLElement): string | undefined {
+  const footer = page.querySelector('footer')
+  return footer ? text(footer) : undefined
+}
+
+/** Types a message into the message input, returning the input. */
+function type(page: HTMLElement, message: string): HTMLTextAreaElement {
+  const input = messageInput(page)
+
+  if (!input) {
     throw new Error('The page has no message input.')
   }
 
   input.value = message
   input.dispatchEvent(new Event('input'))
-  button.click()
+  return input
+}
+
+/** Types a message into the message input and sends it. */
+function send(page: HTMLElement, message: string): void {
+  type(page, message)
+  page.querySelector<HTMLButtonElement>('button[type="submit"]')?.click()
 }
 
 /** The chat thread's messages, in order, each as its text. */
@@ -138,6 +154,12 @@ function text(element: Element): string {
   }
 
   return texts.join(' ').replace(/\s+/g, ' ').trim()
+}
+
+/** The notice of how the Research ended at the end of the thread, as its text, if the page shows one. */
+function outcome(page: HTMLElement): string | undefined {
+  const notice = page.querySelector('[role="status"]')
+  return notice ? text(notice) : undefined
 }
 
 /** The "Use recommendation" button, if the page shows one. */
@@ -226,7 +248,7 @@ describe('HomePage', () => {
       await settle()
 
       expect(currentStep(page)).not.toContain('Running')
-      expect(page.querySelector('app-stepper')?.textContent).toContain('Your turn')
+      expect(messageInput(page)?.placeholder).toBe('Type your own answer…')
     })
 
     it('asks the Research whether a failed Step failed or interrupted it', async () => {
@@ -245,7 +267,7 @@ describe('HomePage', () => {
 
       expect(currentStep(page)).toContain('Grilling')
       expect(currentStep(page)).not.toContain('Running')
-      expect(page.querySelector('app-stepper')?.textContent).toContain('The Grilling agent failed twice.')
+      expect(outcome(page)).toContain('The Grilling agent failed twice.')
     })
 
     it('shows the current state when the send conflicts with a running Step', async () => {
@@ -282,6 +304,27 @@ describe('HomePage', () => {
         'Q1 Who is the audience? Recommended answer: Homeowners.',
         'Installers.',
         expect.stringContaining('Q2 Which climate? Recommended answer: Central Europe.'),
+      ])
+    })
+
+    it.each<ResearchState>([
+      { status: 'running', step: 'retrieval' },
+      { status: 'interrupted', step: 'draft', round: 1 },
+      { status: 'failed', reason: 'The Draft failed Review in every Round.' },
+    ])('keeps the question and the whole Grilling Q&A in the thread after Grilling, when $status', async (state) => {
+      const page = await renderPage({
+        state,
+        artifacts: ['grilling_transcript.json', 'heat_pumps_grilling_protocol.md'],
+        transcript: {
+          question: 'How do heat pumps work?',
+          turns: [{ question: 'Who is the audience?', recommendedAnswer: 'Homeowners.', answer: 'Installers.' }],
+        },
+      })
+
+      expect(thread(page)).toEqual([
+        'How do heat pumps work?',
+        'Q1 Who is the audience? Recommended answer: Homeowners.',
+        'Installers.',
       ])
     })
 
@@ -485,6 +528,29 @@ describe('HomePage', () => {
       expect(viewer(page)?.querySelector('img')?.getAttribute('onerror')).toBeNull()
     })
 
+    it('goes back from an opened Artifact to the chat', async () => {
+      const page = await renderPage({
+        state: { status: 'completed' },
+        artifacts: ALL_ARTIFACTS,
+        transcript: {
+          question: 'How do heat pumps work?',
+          turns: [{ question: 'Who is the audience?', recommendedAnswer: 'Homeowners.', answer: 'Installers.' }],
+        },
+      })
+
+      button(page, 'Back to the chat')?.click()
+      await settle()
+
+      expect(viewer(page)).toBeNull()
+      expect(page.querySelector('app-artifact-list [aria-current]')).toBeNull()
+      expect(thread(page)).toEqual([
+        'How do heat pumps work?',
+        'Q1 Who is the audience? Recommended answer: Homeowners.',
+        'Installers.',
+      ])
+      expect(composer(page)).toBe('New research')
+    })
+
     it('shows a Review without the front matter its verdict badge comes from', async () => {
       const api: FakeResearch = {
         state: { status: 'running', step: 'draft', round: 2 },
@@ -545,7 +611,6 @@ describe('HomePage', () => {
         contents: { 'heat_pumps_report.md': '# Report\n\n## Summary\n\nHeat pumps move heat.\n' },
       }
       const page = await renderPage(api)
-      await open(page, 'Findings')
       const stream = stubStream()
 
       button(page, 'Resume')?.click()
@@ -652,22 +717,79 @@ describe('HomePage', () => {
     })
   })
 
-  it('disables the message input while a Step is running', async () => {
-    const page = await renderPage({ state: { status: 'running', step: 'retrieval' } })
+  describe('message input', () => {
+    it.each<[ResearchState, string]>([
+      [{ status: 'running', step: 'grilling' }, 'Thinking about the next question…'],
+      [{ status: 'running', step: 'source_catalogue' }, 'Picking Primary Sources…'],
+      [{ status: 'running', step: 'retrieval' }, 'Gathering Findings from the Sources…'],
+      [{ status: 'running', step: 'draft', round: 2 }, 'Round 2 · Writing the Draft…'],
+      [{ status: 'running', step: 'review', round: 3 }, 'Round 3 · Reviewing the Draft…'],
+    ])('is disabled while a Step is running and says what it is doing, when %o', async (state, placeholder) => {
+      const page = await renderPage({ state })
 
-    expect(page.querySelector<HTMLTextAreaElement>('textarea[name="message"]')?.disabled).toBe(true)
-    expect(page.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(true)
-  })
+      expect(messageInput(page)?.disabled).toBe(true)
+      expect(messageInput(page)?.placeholder).toBe(placeholder)
+      expect(page.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(true)
+    })
 
-  it.each<ResearchState>([
-    { status: 'completed' },
-    { status: 'interrupted', step: 'grilling' },
-    { status: 'interrupted', step: 'draft', round: 2, reason: 'The Draft agent failed twice.' },
-  ])('offers no message input when the Research is $status, as it would reject or ignore a message', async (state) => {
-    const page = await renderPage({ state })
+    it('asks what to research when there is no Research', async () => {
+      const page = await renderPage({ state: { status: 'none' } })
 
-    expect(page.querySelector('textarea[name="message"]')).toBeNull()
-    expect(page.querySelector('button[type="submit"]')).toBeNull()
+      expect(messageInput(page)?.placeholder).toBe('What do you want to research?')
+    })
+
+    it('invites an answer of your own while Awaiting Answer', async () => {
+      const page = await renderPage({ state: { status: 'awaiting_answer' }, transcript: FIRST_QUESTION })
+
+      expect(messageInput(page)?.placeholder).toBe('Type your own answer…')
+      expect(messageInput(page)?.disabled).toBe(false)
+    })
+
+    it('sends with Enter', async () => {
+      const page = await renderPage({ state: { status: 'none' } })
+      stubStream()
+
+      type(page, 'How do heat pumps work?').dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }),
+      )
+
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/research',
+        expect.objectContaining({ method: 'POST', body: JSON.stringify({ message: 'How do heat pumps work?' }) }),
+      )
+    })
+
+    it('adds a new line with Shift+Enter instead of sending', async () => {
+      const page = await renderPage({ state: { status: 'none' } })
+      const fetched = vi.spyOn(globalThis, 'fetch')
+      const enter = new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, cancelable: true })
+
+      type(page, 'How do heat pumps work?').dispatchEvent(enter)
+
+      expect(fetched).not.toHaveBeenCalled()
+      expect(enter.defaultPrevented).toBe(false)
+    })
+
+    it.each<ResearchState>([
+      { status: 'completed' },
+      { status: 'failed', reason: 'The Draft failed Review in every Round.' },
+    ])('gives way to a New research button when the Research is $status', async (state) => {
+      const page = await renderPage({ state })
+
+      expect(messageInput(page)).toBeNull()
+      expect(page.querySelector('button[type="submit"]')).toBeNull()
+      expect(composer(page)).toBe('New research')
+    })
+
+    it.each<ResearchState>([
+      { status: 'interrupted', step: 'grilling' },
+      { status: 'interrupted', step: 'draft', round: 2, reason: 'The Draft agent failed twice.' },
+    ])('is not offered on an Interrupted Research, which continues with Resume, when %o', async (state) => {
+      const page = await renderPage({ state })
+
+      expect(messageInput(page)).toBeNull()
+      expect(composer(page)).toBeUndefined()
+    })
   })
 
   describe('following a Step this page did not start', () => {
@@ -685,7 +807,7 @@ describe('HomePage', () => {
       TestBed.tick()
 
       expect(currentStep(page)).toContain('Review')
-      expect(currentStep(page)).toContain('Round 1 / 3')
+      expect(currentStep(page)).toContain('Review · 1/3')
 
       await vi.advanceTimersByTimeAsync(2000)
       TestBed.tick()
@@ -748,6 +870,41 @@ describe('HomePage', () => {
     })
   })
 
+  describe('outcome notices', () => {
+    it('end the thread with the reason of a Failed Research', async () => {
+      const page = await renderPage({
+        state: { status: 'failed', reason: 'The Draft failed Review in every Round.' },
+        artifacts: ['grilling_transcript.json'],
+      })
+
+      expect(outcome(page)).toBe('The Research failed The Draft failed Review in every Round.')
+    })
+
+    it('end the thread with the reason of an Interrupted Research and offer Resume', async () => {
+      const page = await renderPage({
+        state: { status: 'interrupted', step: 'review', round: 3, reason: 'The Review agent failed twice.' },
+      })
+
+      expect(outcome(page)).toBe('The Research was interrupted The Review agent failed twice. Resume')
+    })
+
+    it('say an Interrupted Research with no known reason was interrupted', async () => {
+      const page = await renderPage({ state: { status: 'interrupted', step: 'source_catalogue' } })
+
+      expect(outcome(page)).toBe('The Research was interrupted The Research was interrupted. Resume')
+    })
+
+    it.each<ResearchState>([
+      { status: 'none' },
+      { status: 'running', step: 'retrieval' },
+      { status: 'awaiting_answer' },
+    ])('are not shown when the Research is $status', async (state) => {
+      const page = await renderPage({ state })
+
+      expect(outcome(page)).toBeUndefined()
+    })
+  })
+
   describe('Resume', () => {
     it('continues an Interrupted Research from its Artifacts and follows the resumed Steps', async () => {
       const page = await renderPage({
@@ -782,23 +939,23 @@ describe('HomePage', () => {
   })
 
   describe('Reset', () => {
-    it('offers Reset while a Step is running', async () => {
+    it('is offered as New research in the header, also while a Step is running', async () => {
       const page = await renderPage({ state: { status: 'running', step: 'retrieval' } })
 
-      expect(button(page, 'Reset')?.disabled).toBe(false)
+      expect(page.querySelector('header')?.textContent).toContain('New research')
+      expect(button(page, 'New research')?.disabled).toBe(false)
     })
 
-    it('offers a Failed Research Reset and nothing else', async () => {
-      const page = await renderPage({ state: { status: 'failed', reason: 'The Draft failed Review in every Round.' } })
+    it('is not offered when there is no Research', async () => {
+      const page = await renderPage({ state: { status: 'none' } })
 
-      expect([...page.querySelectorAll('button')].map((item) => item.textContent?.trim())).toEqual(['Reset'])
-      expect(page.querySelector('textarea[name="message"]')).toBeNull()
+      expect(button(page, 'New research')).toBeUndefined()
     })
 
     it('asks for confirmation and deletes nothing when cancelled', async () => {
       const page = await renderPage({ state: { status: 'completed' }, artifacts: ['q.report.md'] })
 
-      button(page, 'Reset')?.click()
+      button(page, 'New research')?.click()
       TestBed.tick()
 
       expect(page.querySelector('[role="alertdialog"]')?.textContent).toContain('This deletes every Artifact.')
@@ -814,9 +971,9 @@ describe('HomePage', () => {
     it('deletes the Research once confirmed and shows the empty state', async () => {
       const page = await renderPage({ state: { status: 'completed' }, artifacts: ['q.report.md'] })
 
-      button(page, 'Reset')?.click()
+      button(page, 'New research')?.click()
       TestBed.tick()
-      button(page, 'Delete')?.click()
+      button(page, 'Delete and start over')?.click()
       TestBed.inject(HttpTestingController)
         .expectOne({ method: 'DELETE', url: '/api/research' })
         .flush(null, { status: 204, statusText: 'No Content' })
@@ -840,9 +997,9 @@ describe('HomePage', () => {
         .flush({ question: 'How do heat pumps work?', turns: [] })
       await settle()
 
-      button(page, 'Reset')?.click()
+      button(page, 'New research')?.click()
       TestBed.tick()
-      button(page, 'Delete')?.click()
+      button(page, 'Delete and start over')?.click()
       TestBed.inject(HttpTestingController)
         .expectOne({ method: 'DELETE', url: '/api/research' })
         .flush(null, { status: 204, statusText: 'No Content' })
@@ -862,9 +1019,9 @@ describe('HomePage', () => {
       const page = await renderPage({ state: { status: 'completed' }, artifacts: ['q.report.md'] })
       const http = TestBed.inject(HttpTestingController)
 
-      button(page, 'Reset')?.click()
+      button(page, 'New research')?.click()
       TestBed.tick()
-      button(page, 'Delete')?.click()
+      button(page, 'Delete and start over')?.click()
       http
         .expectOne({ method: 'DELETE', url: '/api/research' })
         .flush('Internal Server Error', { status: 500, statusText: 'Internal Server Error' })
@@ -889,8 +1046,7 @@ describe('HomePage', () => {
     it('shows the Round of a running Draft', async () => {
       const page = await renderPage({ state: { status: 'running', step: 'draft', round: 2 } })
 
-      expect(currentStep(page)).toContain('Draft')
-      expect(currentStep(page)).toContain('Round 2 / 3')
+      expect(currentStep(page)).toContain('Draft · 2/3')
     })
 
     it('marks the Steps before the current one as done and the ones after it as upcoming', async () => {
@@ -907,34 +1063,23 @@ describe('HomePage', () => {
 
       expect(currentStep(page)).toContain('Grilling')
       expect(currentStep(page)).not.toContain('Running')
-      expect(page.querySelector('app-stepper')?.textContent).toContain('Your turn')
     })
 
-    it('shows an Interrupted Research at its Step and Round with its reason', async () => {
+    it('shows an Interrupted Research at its Step and Round', async () => {
       const page = await renderPage({
         state: { status: 'interrupted', step: 'review', round: 3, reason: 'The Review agent failed twice.' },
       })
 
-      expect(currentStep(page)).toContain('Review')
-      expect(currentStep(page)).toContain('Round 3 / 3')
+      expect(currentStep(page)).toContain('Review · 3/3')
       expect(currentStep(page)).not.toContain('Running')
-      expect(page.querySelector('app-stepper')?.textContent).toContain('The Review agent failed twice.')
     })
 
-    it('says an Interrupted Research with no known reason was interrupted', async () => {
-      const page = await renderPage({ state: { status: 'interrupted', step: 'source_catalogue' } })
-
-      expect(currentStep(page)).toContain('Source Catalogue')
-      expect(page.querySelector('app-stepper')?.textContent).toContain('The Research was interrupted')
-    })
-
-    it('shows the reason of a Failed Research', async () => {
+    it('marks no Step as current once the Research Failed', async () => {
       const page = await renderPage({
         state: { status: 'failed', reason: 'The Draft failed Review in every Round.' },
       })
 
       expect(currentStep(page)).toBeUndefined()
-      expect(page.querySelector('app-stepper')?.textContent).toContain('The Draft failed Review in every Round.')
     })
 
     it('marks every Step as done once the Research is Completed', async () => {
@@ -947,13 +1092,21 @@ describe('HomePage', () => {
       expect(page.querySelector('app-stepper')?.textContent).toContain('Completed')
     })
 
-    it('marks every Step as upcoming when there is no Research', async () => {
+    it('is not shown when there is no Research', async () => {
       const page = await renderPage({ state: { status: 'none' } })
 
-      expect(currentStep(page)).toBeUndefined()
-      for (const label of ['Grilling', 'Source Catalogue', 'Retrieval', 'Draft', 'Review']) {
-        expect(step(page, label)).toContain('Upcoming')
-      }
+      expect(page.querySelector('app-stepper')).toBeNull()
+    })
+
+    it.each<[ResearchState, string]>([
+      [{ status: 'running', step: 'retrieval' }, 'Retrieval'],
+      [{ status: 'interrupted', step: 'review', round: 2 }, 'Review · 2/3'],
+      [{ status: 'completed' }, 'Completed'],
+    ])('collapses for narrow screens to dots and the current Step, when %o', async (state, summary) => {
+      const page = await renderPage({ state })
+
+      expect(page.querySelectorAll('app-stepper [data-dot]')).toHaveLength(5)
+      expect(page.querySelector('app-stepper p')?.textContent?.replace(/\s+/g, ' ').trim()).toBe(summary)
     })
   })
 })
