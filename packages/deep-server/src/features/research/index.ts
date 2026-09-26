@@ -20,23 +20,23 @@ type ResearchConfig = {
   question: string
   // TODO make create_catalogue optional by accepting a catalogue as input
   // TODO make grilling optional, or maybe not
-  writer: (step: Update) => Promise<void>
+  writerFn: (step: Update) => Promise<void>
 }
 
 const MAX_REVIEW_ROUNDS = 3
 
 export async function research(config: ResearchConfig): Promise<void> {
-  const { question, writer } = config
+  const { question, writerFn } = config
 
   const threadId = crypto.randomUUID()
 
-  writer({ type: 'step', value: 'grilling' })
+  writerFn({ type: 'step', value: 'grilling' })
   const topicName = await grill(threadId, config)
 
-  writer({ type: 'step', value: 'create_catalogue' })
+  writerFn({ type: 'step', value: 'create_catalogue' })
   await createCatalogue(question)
 
-  writer({ type: 'step', value: 'retrieval' })
+  writerFn({ type: 'step', value: 'retrieval' })
   await retrieveInformation(question, topicName)
 
   let reviewRounds = 0
@@ -45,20 +45,20 @@ export async function research(config: ResearchConfig): Promise<void> {
   while (reviewRounds < MAX_REVIEW_ROUNDS && !reviewPassed) {
     reviewRounds++
 
-    writer({ type: 'step', value: `draft_${reviewRounds}` })
+    writerFn({ type: 'step', value: `draft_${reviewRounds}` })
     await draft(topicName)
 
-    writer({ type: 'step', value: `review_${reviewRounds}` })
+    writerFn({ type: 'step', value: `review_${reviewRounds}` })
     reviewPassed = await review(topicName)
   }
 
   if (!reviewPassed) {
-    writer({ type: 'step', value: 'fail' })
+    writerFn({ type: 'step', value: 'fail' })
 
     return
   }
 
-  writer({ type: 'step', value: 'done' })
+  writerFn({ type: 'step', value: 'done' })
 }
 
 const agentConfig: AgentConfig = {
@@ -72,7 +72,7 @@ const agentConfig: AgentConfig = {
   skills: SKILLS,
 }
 
-async function grill(threadId: string, { question, writer }: ResearchConfig): Promise<string> {
+async function grill(threadId: string, { question, writerFn }: ResearchConfig): Promise<string> {
   const systemPrompt = `The user wants to conduct research about a topic. Before anything we have to clarify the scope and the goal of the research.
 Use /grilling skill to start a grilling session. When every gap is closed. Save the protocol of the grilling session
 in <topic-name>_grilling_protocol.md. Also return the name of the topic in XML Tags. Example: <topic-name>Arabica_Beans</topic-name>.`
@@ -101,7 +101,7 @@ in <topic-name>_grilling_protocol.md. Also return the name of the topic in XML T
       name = matches[1]
     }
 
-    await writer({
+    await writerFn({
       id: crypto.randomUUID(),
       message: text,
     })

@@ -2,16 +2,14 @@ import { defineHandler } from 'nitro'
 import { EventStream, readValidatedBody } from 'nitro/h3'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
-import { streamAgent } from '../../features/harness'
-import type { WriterFn } from '../../features/harness/types'
+import { research } from '~/src/features/research'
 
 const request = z.object({
-  message: z.string(),
-  threadId: z.uuid(),
+  question: z.string(),
 })
 
 export default defineHandler(async (event) => {
-  const { message, threadId } = await readValidatedBody(event, request)
+  const { question } = await readValidatedBody(event, request)
 
   const stream = new EventStream(event)
 
@@ -19,9 +17,8 @@ export default defineHandler(async (event) => {
     await stream.push(JSON.stringify(data))
   }
 
-  void streamAgent({
-    humanMessage: message,
-    threadId,
+  void research({
+    question,
     writerFn,
   })
     .catch(async () => await writerFn({ type: 'message', id: randomUUID(), content: 'API error' }))
