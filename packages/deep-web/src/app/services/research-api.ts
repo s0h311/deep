@@ -21,6 +21,10 @@ import { SourceCatalogue } from '../models/source-catalogue'
 const POLL_INTERVAL = 2000
 /** The front matter a Review keeps its verdict in. */
 const FRONT_MATTER = /^---\n[\s\S]*?\n---\n/
+/** The first line of the Report's Summary section. */
+const SUMMARY_LINE = /^## Summary\n+(.+)/m
+/** A citation of one or more Findings, with the space before it: `[F3]` or `[F1, F2]`. */
+const CITATION = /\s*\[F\d+(?:\s*,\s*F\d+)*\]/g
 
 /** An event on the stream of `POST /api/research`. */
 type ResearchEvent =
@@ -69,11 +73,14 @@ export class ResearchApi {
   private readonly report = computed(() =>
     this.state().status === 'completed' ? this.ordered().find(({ kind }) => kind === 'report')?.name : undefined,
   )
-  /** The name of the Artifact the user opened, and the Finding to scroll to if it is the Findings. The Report opens on its own once the Research is Completed. */
-  private readonly selection = linkedSignal<{ name: string; finding?: string } | undefined>(() => {
-    const report = this.report()
-    return report ? { name: report } : undefined
+  private readonly reportContent = httpResource.text(() => {
+    const name = this.report()
+    return name ? artifactUrl(name) : undefined
   })
+  /** The name of the Artifact the user opened, and the Finding to scroll to if it is the Findings. */
+  private readonly selection = signal<{ name: string; finding?: string } | undefined>(undefined)
+  /** Whether this page saw the Research go from Running to Completed and hasn't shown the Report since. */
+  private readonly watchedCompletion = signal(false)
   private readonly content = httpResource.text(() => {
     const name = this.opened()?.name
     return name ? artifactUrl(name) : undefined
@@ -132,8 +139,31 @@ export class ResearchApi {
   readonly sources = computed(() => (this.catalogue.hasValue() ? this.catalogue.value().sources : undefined))
   /** Whether the Research would reject a message now. */
   readonly busy = computed(() => this.streaming() || this.state().status === 'running')
+  /** Once the Research is Completed, the first line of the Report's Summary without its citations, or `''` until read. */
+  readonly reportSummary = computed(() => {
+    if (!this.report()) {
+      return undefined
+    }
+
+    const line = this.reportContent.hasValue() ? this.reportContent.value().match(SUMMARY_LINE)?.[1] : undefined
+    return line?.replace(CITATION, '').trim() ?? ''
+  })
+  /** Whether the Report is there to show because this page watched the Research complete, rather than loaded it Completed. */
+  readonly reportDue = computed(() => this.watchedCompletion() && this.report() !== undefined)
 
   constructor() {
+    // A poll that finds a Running Research Completed; a stream says so with its `completed` Step.
+    let previous: ResearchState['status'] | undefined
+    effect(() => {
+      const status = this.state().status
+
+      if (previous === 'running' && status === 'completed') {
+        this.watchedCompletion.set(true)
+      }
+
+      previous = status
+    })
+
     // A Step started by another tab, or before a reload, has no stream here, so it is followed by polling.
     // Each read ending, even in an error, re-runs this effect, which schedules the next poll while the Research still runs.
     effect((onCleanup) => {
@@ -174,6 +204,16 @@ export class ResearchApi {
   /** Opens the Artifact with the given name. */
   open(name: string): void {
     this.selection.set({ name })
+  }
+
+  /** Opens the Report of a Completed Research. */
+  openReport(): void {
+    const report = this.report()
+
+    if (report) {
+      this.watchedCompletion.set(false)
+      this.selection.set({ name: report })
+    }
   }
 
   /** Closes the open Artifact, going back to the chat thread. */
@@ -243,6 +283,7 @@ export class ResearchApi {
       this.researchState.set({ status: 'none' })
       this.artifactNames.set([])
       this.selection.set(undefined)
+      this.watchedCompletion.set(false)
     } catch {
       // The Research may be partly deleted: show what is left of it.
       this.researchState.reload()
@@ -254,6 +295,10 @@ export class ResearchApi {
   private follow(event: ResearchEvent): void {
     if (event.type !== 'step') {
       return
+    }
+
+    if (event.step === 'completed') {
+      this.watchedCompletion.set(true)
     }
 
     if (event.step === 'failed') {

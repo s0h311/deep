@@ -1,4 +1,4 @@
-import { Component, computed, inject, signal } from '@angular/core'
+import { Component, computed, effect, inject, signal, untracked } from '@angular/core'
 import { ArtifactList } from '../../components/artifact-list/artifact-list'
 import { GrillingThread } from '../../components/grilling-thread/grilling-thread'
 import { MarkdownView } from '../../components/markdown-view/markdown-view'
@@ -61,6 +61,15 @@ export class HomePage {
     }
   })
 
+  constructor() {
+    // Watching the Research complete opens the Report by itself, once; a Research loaded Completed only shows the card.
+    effect(() => {
+      if (this.research.reportDue()) {
+        untracked(() => this.readReport())
+      }
+    })
+  }
+
   /** Enter sends the message; Shift+Enter leaves the textarea to add a new line. */
   protected keydown(event: KeyboardEvent): void {
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -84,6 +93,12 @@ export class HomePage {
   /** Continues an Interrupted Research: outside Awaiting Answer the Research ignores the message. */
   protected resume(): void {
     this.send('')
+  }
+
+  /** Opens the drawer on the Report. */
+  protected readReport(): void {
+    this.drawerOpen.set(true)
+    this.research.openReport()
   }
 
   /** Closes the drawer along with any Artifact open in it. */

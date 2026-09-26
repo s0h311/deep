@@ -250,6 +250,12 @@ function viewer(page: HTMLElement): HTMLElement | null {
   return page.querySelector('app-markdown-view')
 }
 
+/** The Report ready card at the end of the thread, as its text, if the page shows one. */
+function reportCard(page: HTMLElement): string | undefined {
+  const card = page.querySelector('[aria-label="Report ready"]')
+  return card ? text(card) : undefined
+}
+
 /** The stepper's current Step, the one marked aria-current. */
 function currentStep(page: HTMLElement): string | undefined {
   return page.querySelector('[aria-current="step"]')?.textContent?.replace(/\s+/g, ' ').trim()
@@ -687,50 +693,13 @@ describe('HomePage', () => {
       expect(viewer(page)?.querySelector('hr')).toBeNull()
     })
 
-    it('shows the Report when the drawer of a Completed Research opens', async () => {
-      const page = await renderPage({
-        state: { status: 'completed' },
-        artifacts: ALL_ARTIFACTS,
-        contents: { 'heat_pumps_report.md': '# Report\n\n## Summary\n\nHeat pumps move heat [F1].\n' },
-      })
-
-      expect(drawer(page)).toBeNull()
+    it('opens the drawer of a Completed Research on the Artifact list', async () => {
+      const page = await renderPage({ state: { status: 'completed' }, artifacts: ALL_ARTIFACTS })
 
       await openDrawer(page)
 
-      expect(readerTitle(page)).toBe('Report')
-      expect(viewer(page)?.querySelector('h2')?.textContent).toBe('Summary')
-      expect(viewer(page)?.querySelector('a')?.getAttribute('href')).toBe('#F1')
-    })
-
-    it('opens the Report once the Research completes', async () => {
-      const artifacts = ALL_ARTIFACTS.filter((name) => name !== 'heat_pumps_report.md')
-      const api: FakeResearch = {
-        state: { status: 'interrupted', step: 'review', round: 2 },
-        artifacts,
-        contents: { 'heat_pumps_report.md': '# Report\n\n## Summary\n\nHeat pumps move heat.\n' },
-      }
-      const page = await renderPage(api)
-      await openDrawer(page)
-      const stream = stubStream()
-
-      button(page, 'Resume')?.click()
-      stream.push({ type: 'step', step: 'review', round: 2 })
-      await settle()
-      TestBed.inject(HttpTestingController)
-        .expectOne({ method: 'GET', url: '/api/research/artifacts' })
-        .flush(artifacts)
-      stream.push({ type: 'step', step: 'completed' })
-      stream.close()
-      await settle()
-      TestBed.inject(HttpTestingController)
-        .expectOne({ method: 'GET', url: '/api/research/artifacts' })
-        .flush(ALL_ARTIFACTS)
-      await settle()
-      await answerArtifactReads()
-
-      expect(readerTitle(page)).toBe('Report')
-      expect(viewer(page)?.querySelector('h1')?.textContent).toBe('Report')
+      expect(readerTitle(page)).toBeUndefined()
+      expect(artifactList(page)).toContain('Report')
     })
 
     it('shows a JSON Artifact as its JSON', async () => {
@@ -815,6 +784,80 @@ describe('HomePage', () => {
         expect(viewer(page)?.textContent).toContain('They cut energy use by 90% [F2].')
         expect(links(page)).toEqual([])
       })
+    })
+  })
+
+  describe('Report ready', () => {
+    const REPORT =
+      '# Report\n\n## Summary\n\nHeat pumps move heat [F1] and cut energy use [F1, F2].\nThey work in cold climates [F3].\n\n## Key facts\n\n- Fact [F1]\n'
+
+    it("ends the thread of a Completed Research with the Summary's first line, without citations, and leaves the drawer closed", async () => {
+      const page = await renderPage({
+        state: { status: 'completed' },
+        artifacts: ALL_ARTIFACTS,
+        contents: { 'heat_pumps_report.md': REPORT },
+      })
+
+      expect(reportCard(page)).toBe('Report ready Heat pumps move heat and cut energy use. Read the Report')
+      expect(page.querySelector('main > div')?.lastElementChild?.getAttribute('aria-label')).toBe('Report ready')
+      expect(drawer(page)).toBeNull()
+    })
+
+    it('is not shown before the Research is Completed', async () => {
+      const page = await renderPage({
+        state: { status: 'running', step: 'review', round: 2 },
+        artifacts: ALL_ARTIFACTS,
+        contents: { 'heat_pumps_report.md': REPORT },
+      })
+
+      expect(reportCard(page)).toBeUndefined()
+    })
+
+    it('opens the Report in the drawer with Read the Report', async () => {
+      const page = await renderPage({
+        state: { status: 'completed' },
+        artifacts: ALL_ARTIFACTS,
+        contents: { 'heat_pumps_report.md': REPORT },
+      })
+
+      button(page, 'Read the Report')?.click()
+      await settle()
+      await answerArtifactReads()
+
+      expect(readerTitle(page)).toBe('Report')
+      expect(viewer(page)?.querySelector('h2')?.textContent).toBe('Summary')
+    })
+
+    it('opens the drawer on the Report by itself, once, when this page watches the Research complete', async () => {
+      const artifacts = ALL_ARTIFACTS.filter((name) => name !== 'heat_pumps_report.md')
+      const page = await renderPage({
+        state: { status: 'interrupted', step: 'review', round: 2 },
+        artifacts,
+        contents: { 'heat_pumps_report.md': REPORT },
+      })
+      const http = TestBed.inject(HttpTestingController)
+      const stream = stubStream()
+
+      button(page, 'Resume')?.click()
+      stream.push({ type: 'step', step: 'review', round: 2 })
+      await settle()
+      http.expectOne({ method: 'GET', url: '/api/research/artifacts' }).flush(artifacts)
+      stream.push({ type: 'step', step: 'completed' })
+      stream.close()
+      await settle()
+      http.expectOne({ method: 'GET', url: '/api/research/artifacts' }).flush(ALL_ARTIFACTS)
+      await settle()
+      await answerArtifactReads()
+
+      expect(readerTitle(page)).toBe('Report')
+      expect(viewer(page)?.querySelector('h1')?.textContent).toBe('Report')
+      expect(reportCard(page)).toContain('Heat pumps move heat and cut energy use.')
+
+      iconButton(page, 'Close')?.click()
+      await settle()
+      await openDrawer(page)
+
+      expect(readerTitle(page)).toBeUndefined()
     })
   })
 
@@ -945,6 +988,23 @@ describe('HomePage', () => {
       TestBed.tick()
 
       expect(currentStep(page)).toContain('Review')
+    })
+
+    it('opens the drawer on the Report when a poll finds the Research Completed', async () => {
+      const artifacts = ALL_ARTIFACTS.filter((name) => name !== 'heat_pumps_report.md')
+      const page = await renderPage({ state: { status: 'running', step: 'review', round: 2 }, artifacts })
+      const http = TestBed.inject(HttpTestingController)
+
+      await vi.advanceTimersByTimeAsync(2000)
+      TestBed.tick()
+      http.expectOne({ method: 'GET', url: '/api/research' }).flush({ status: 'completed' })
+      await vi.advanceTimersByTimeAsync(0)
+      TestBed.tick()
+      http.expectOne({ method: 'GET', url: '/api/research/artifacts' }).flush(ALL_ARTIFACTS)
+      await settle()
+      await answerArtifactReads()
+
+      expect(readerTitle(page)).toBe('Report')
     })
 
     it('shows a Grilling question asked by a send this page did not start', async () => {
