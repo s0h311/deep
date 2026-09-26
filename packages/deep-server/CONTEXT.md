@@ -7,7 +7,7 @@ Runs an automated Research: a fixed sequence of Steps that turns a user's questi
 ### Research
 
 **Research**:
-The single end-to-end run from the user's question to a verdict. Only one Research exists at a time.
+The single end-to-end run from the user's question to a verdict. Only one Research exists at a time: it begins with the user's first message and ends with a reset. Until then there is no Research.
 _Avoid_: Session, job, project
 
 **Step**:
@@ -22,6 +22,13 @@ _Avoid_: Supervisor, planner
 A file a Step produces. The set of existing Artifacts is the Research's state.
 _Avoid_: Output, document
 
+**Running**:
+A Research whose Step is in progress right now.
+
+**Awaiting Answer**:
+A Research in the Grilling Step whose last question in the Grilling Transcript is still unanswered. The user's next message is taken as the answer.
+_Avoid_: Paused, waiting
+
 **Completed**:
 A Research whose Draft passed Review and was published as the Report.
 
@@ -34,8 +41,8 @@ _Avoid_: Paused, crashed
 
 ### Artifacts
 
-**Grilling Transcript**:
-The Grilling Step's interim Artifact: the question and the interview so far. Deleted once the GP is written.
+**Grilling Transcript** (GT):
+The record of the Grilling Step's interview: the question and every question, recommended answer and answer asked so far. Kept after the GP is written.
 _Avoid_: Working file, chat history
 
 **Grilling Protocol** (GP):
