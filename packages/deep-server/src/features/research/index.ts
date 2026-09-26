@@ -21,6 +21,11 @@ export class ResearchConflict extends Error {
   override name = 'ResearchConflict'
 }
 
+/** A name that is no Artifact of the Research. */
+export class ArtifactNotFound extends Error {
+  override name = 'ArtifactNotFound'
+}
+
 /** A Step whose agent failed on every attempt, leaving the Research Interrupted. */
 class StepInterrupted extends Error {
   override name = 'StepInterrupted'
@@ -31,6 +36,10 @@ export type Emit = (event: ResearchEvent) => void | Promise<void>
 export type Research = {
   /** Advances the Research according to its state, emitting progress until a terminal step value. */
   send(message: string, emit: Emit): Promise<void>
+  /** The names of the Artifacts and working files produced so far, sorted. */
+  listArtifacts(): Promise<string[]>
+  /** The content of the Artifact with the given name. */
+  readArtifact(name: string): Promise<string>
 }
 
 type ResearchConfig = {
@@ -495,6 +504,18 @@ export function createResearch({
 
         await emit({ type: 'step', step: 'failed', reason: error.message })
       }
+    },
+
+    async listArtifacts() {
+      return (await artifactNames()).toSorted()
+    },
+
+    async readArtifact(name) {
+      if (!(await artifactNames()).includes(name)) {
+        throw new ArtifactNotFound(`No Artifact named ${name}.`)
+      }
+
+      return await readFile(join(root, name), 'utf8')
     },
   }
 }

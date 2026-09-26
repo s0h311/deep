@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 import { type BaseMessage, HumanMessage, SystemMessage } from '@langchain/core/messages'
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { createResearch, ResearchConflict, type ResearchEvent } from './index.ts'
+import { basename, join } from 'node:path'
+import { ArtifactNotFound, createResearch, ResearchConflict, type ResearchEvent } from './index.ts'
 import { type Script, scriptedChatModel, structuredResponse } from '../../infrastructure/agent/scripted-chat-model.ts'
 import { defined } from '../../infrastructure/utils/utils.ts'
 
@@ -715,6 +715,44 @@ describe('Research', () => {
         { type: 'step', step: 'review', round: 1 },
         { type: 'step', step: 'completed' },
       ])
+    })
+  })
+
+  describe('Artifacts', () => {
+    const questionModel = () =>
+      scriptedChatModel(() =>
+        structuredResponse({ question: 'Who is the audience?', recommendedAnswer: 'Retail investors' }),
+      )
+
+    test('after a Grilling turn, the transcript is listed and can be read', async () => {
+      const research = createResearch({ model: questionModel(), root })
+      await send(research, 'How do central banks set interest rates?')
+
+      expect(await research.listArtifacts()).toEqual(['grilling_transcript.json'])
+      expect(JSON.parse(await research.readArtifact('grilling_transcript.json'))).toEqual({
+        question: 'How do central banks set interest rates?',
+        turns: [{ question: 'Who is the audience?', recommendedAnswer: 'Retail investors' }],
+      })
+    })
+
+    test('reading an Artifact that does not exist is rejected as not found', async () => {
+      const research = createResearch({ model: questionModel(), root })
+      await send(research, 'How do central banks set interest rates?')
+
+      await expect(research.readArtifact('fake_research_report.md')).rejects.toThrow(ArtifactNotFound)
+    })
+
+    test.each([
+      ['a parent segment', () => `../${basename(root)}/grilling_transcript.json`],
+      ['a current-directory segment', () => './grilling_transcript.json'],
+      ['an absolute path', () => join(root, 'grilling_transcript.json')],
+      ['encoded separators', () => `..%2F${basename(root)}%2Fgrilling_transcript.json`],
+      ['the parent directory', () => '..'],
+    ])('reading by %s is rejected as not found, even where it points at an Artifact', async (_, name) => {
+      const research = createResearch({ model: questionModel(), root })
+      await send(research, 'How do central banks set interest rates?')
+
+      await expect(research.readArtifact(name())).rejects.toThrow(ArtifactNotFound)
     })
   })
 })
