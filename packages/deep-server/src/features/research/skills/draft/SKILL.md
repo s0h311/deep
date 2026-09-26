@@ -13,6 +13,10 @@ A Claim is any statement about a specific entity, number, date, event or quote, 
 - Never state a Claim no Finding backs, not even from your own knowledge. Make it a Gap instead.
 - General mechanisms and truisms ("central banks raise rates to curb inflation") are not Claims and need no citation. Keep them few.
 
+## Revising a failed Draft
+
+From the second Round on, you also get the previous Draft and its Review, which lists every offending Claim and why it failed. Write the whole Draft again, keeping what passed and fixing each offending Claim: cite the Finding that states it, or, if none does, drop it or make it a Gap. Don't introduce new unbacked Claims while fixing old ones.
+
 ## Response
 
 - `summary`: a short, direct answer to the Research question for the audience in the Grilling Protocol.

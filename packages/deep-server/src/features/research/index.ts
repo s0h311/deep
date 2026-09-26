@@ -137,16 +137,18 @@ const RETRIEVAL_SYSTEM_PROMPT = `You run the Retrieval Step of a Research: gathe
 You are given the Grilling Protocol and the Source Catalogue of the Research. Search and read only the hosts in the Source Catalogue, then respond with every Finding you gathered.`
 
 const DRAFT_SYSTEM_PROMPT = `You run the Draft Step of a Research: write the Report from its Findings, following the draft skill.
-You are given the Grilling Protocol and the Findings of the Research. Respond with the summary, key facts, Gaps and follow-up questions, citing the Finding behind every Claim inline as [Fn].`
+You are given the Grilling Protocol and the Findings of the Research, and from the second Round on, the previous Draft and its failing Review. Respond with the summary, key facts, Gaps and follow-up questions, citing the Finding behind every Claim inline as [Fn].`
 
 const REVIEW_SYSTEM_PROMPT = `You run the Review Step of a Research: check that every Claim in a Draft cites a Finding that supports it, following the review skill.
 You are given the Draft and the Findings of the Research. Respond with your verdict and every offending Claim.`
 
 const NO_PRIMARY_SOURCES = 'No Primary Source could be identified for the Research.'
 const NO_FINDINGS = 'Retrieval found no Findings on the Primary Sources of the Research.'
+const ALL_ROUNDS_FAILED = 'The Draft failed Review in every Round.'
 const RESET_FIRST = 'The Research has ended; reset first to start a new one.'
 
 const MAX_GRILLING_QUESTIONS = 5
+const MAX_ROUNDS = 3
 
 const CONCLUDE_INSTRUCTION = `You have asked ${MAX_GRILLING_QUESTIONS} questions, the maximum. Conclude now with a Topic and the Grilling Protocol, recording every unresolved point as an open assumption.`
 
@@ -311,10 +313,20 @@ export function createResearch({
     await emit({ type: 'step', step: 'draft', round })
 
     const findings = await readFile(join(root, `${topic}${FINDINGS_SUFFIX}`), 'utf8')
+    // From Round 2, the agent revises the previous Draft against its failing Review.
+    const previous =
+      round > 1
+        ? [
+            await readFile(join(root, draftName(topic, round - 1)), 'utf8'),
+            await readFile(join(root, reviewName(topic, round - 1)), 'utf8'),
+          ]
+        : []
     const response = await runAgent({
       model,
       systemPrompt: DRAFT_SYSTEM_PROMPT,
-      message: [await readFile(join(root, `${topic}${GRILLING_PROTOCOL_SUFFIX}`), 'utf8'), findings].join('\n\n'),
+      message: [await readFile(join(root, `${topic}${GRILLING_PROTOCOL_SUFFIX}`), 'utf8'), findings, ...previous].join(
+        '\n\n',
+      ),
       responseFormat: draft,
       skill: appSkill('draft'),
     })
@@ -340,6 +352,12 @@ export function createResearch({
     await writeFile(join(root, reviewName(topic, round)), renderReview(response, round))
 
     return response.verdict
+  }
+
+  async function readVerdict({ topic, round }: Round): Promise<Verdict> {
+    const verdict = (await readFile(join(root, reviewName(topic, round)), 'utf8')).match(/^---\nverdict: (\w+)\n/)?.[1]
+
+    return review.shape.verdict.parse(verdict)
   }
 
   async function hasFindings(topic: string): Promise<boolean> {
@@ -418,16 +436,35 @@ export function createResearch({
         throw new ResearchConflict(RESET_FIRST)
       }
 
-      if (!names.some((name) => name.startsWith(`${topic}_draft_`))) {
-        await writeDraft({ topic, round: 1 }, emit)
+      let round = Math.max(1, lastRound(topic, names))
+      let verdict = names.includes(reviewName(topic, round)) ? await readVerdict({ topic, round }) : undefined
+
+      if (verdict === 'fail' && round === MAX_ROUNDS) {
+        // A failed last Round means Failed.
+        throw new ResearchConflict(RESET_FIRST)
       }
 
-      if ((await reviewDraft({ topic, round: 1 }, emit)) === 'pass') {
-        await copyFile(join(root, draftName(topic, 1)), join(root, `${topic}${REPORT_SUFFIX}`))
-        await emit({ type: 'step', step: 'completed' })
+      while (verdict !== 'pass') {
+        if (verdict === 'fail') {
+          if (round === MAX_ROUNDS) {
+            await emit({ type: 'step', step: 'failed', reason: ALL_ROUNDS_FAILED })
+
+            return
+          }
+
+          round += 1
+        }
+
+        // A Draft without its Review is reviewed, not drafted again.
+        if (!names.includes(draftName(topic, round))) {
+          await writeDraft({ topic, round }, emit)
+        }
+
+        verdict = await reviewDraft({ topic, round }, emit)
       }
 
-      // Until failing Rounds are handled, the Research stops after a failed Review.
+      await copyFile(join(root, draftName(topic, round)), join(root, `${topic}${REPORT_SUFFIX}`))
+      await emit({ type: 'step', step: 'completed' })
     },
   }
 }
@@ -438,6 +475,17 @@ function draftName(topic: string, round: number): string {
 
 function reviewName(topic: string, round: number): string {
   return `${topic}_review_${round}.md`
+}
+
+/** The number of the latest Round with a Draft, 0 before the first. */
+function lastRound(topic: string, names: string[]): number {
+  const rounds = names.flatMap((name) => {
+    const [, prefix, round] = name.match(/^(.+)_draft_(\d+)\.md$/) ?? []
+
+    return prefix === topic ? [Number(round)] : []
+  })
+
+  return Math.max(0, ...rounds)
 }
 
 /** The URL of each Finding in a rendered Findings file, by its ID. */
