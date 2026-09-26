@@ -10,6 +10,8 @@ import { ResearchApi } from '../../services/research-api'
 export class HomePage {
   protected readonly research = inject(ResearchApi)
   protected readonly message = signal('')
+  /** Whether the page is asking the user to confirm a reset. */
+  protected readonly confirmingReset = signal(false)
 
   protected sendTyped(event: SubmitEvent): void {
     event.preventDefault()
@@ -21,6 +23,16 @@ export class HomePage {
 
     this.message.set('')
     this.send(message)
+  }
+
+  /** Continues an Interrupted Research: outside Awaiting Answer the Research ignores the message. */
+  protected resume(): void {
+    this.send('')
+  }
+
+  protected reset(): void {
+    this.confirmingReset.set(false)
+    void this.research.reset()
   }
 
   protected send(message: string): void {

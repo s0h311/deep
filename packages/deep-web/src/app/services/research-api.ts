@@ -1,6 +1,7 @@
 import { isPlatformBrowser } from '@angular/common'
-import { httpResource } from '@angular/common/http'
+import { HttpClient, httpResource } from '@angular/common/http'
 import { computed, effect, inject, Injectable, PLATFORM_ID, signal, untracked } from '@angular/core'
+import { firstValueFrom } from 'rxjs'
 import { GrillingTranscript } from '../models/grilling-transcript'
 import { ResearchState } from '../models/research-state'
 
@@ -24,7 +25,10 @@ export class ResearchApi {
     this.grilling() ? '/api/research/artifacts/grilling_transcript.json' : undefined,
   )
   private readonly streaming = signal(false)
+  /** Cancels the stream this page is reading, if any. */
+  private stream?: AbortController
   private readonly browser = isPlatformBrowser(inject(PLATFORM_ID))
+  private readonly http = inject(HttpClient)
 
   readonly state = computed<ResearchState>(() =>
     this.researchState.hasValue() ? this.researchState.value() : { status: 'none' },
@@ -65,6 +69,8 @@ export class ResearchApi {
       this.transcript.set(answered(transcript, message))
     }
 
+    const stream = new AbortController()
+    this.stream = stream
     this.streaming.set(true)
 
     try {
@@ -72,6 +78,7 @@ export class ResearchApi {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ message }),
+        signal: stream.signal,
       })
 
       if (!response.ok || !response.body) {
@@ -84,10 +91,31 @@ export class ResearchApi {
         this.follow(event)
       }
     } catch {
+      // A reset cancelled the stream and set the state itself.
+      if (stream.signal.aborted) {
+        return
+      }
+
       // The connection dropped; the Step may still be running on the server, which polling then follows.
       this.researchState.reload()
     } finally {
       this.streaming.set(false)
+    }
+  }
+
+  /** Deletes the Research with every Artifact, leaving no Research. */
+  async reset(): Promise<void> {
+    // Cancelled first, so the `failed` step a reset ends the stream with isn't followed.
+    this.stream?.abort()
+
+    try {
+      await firstValueFrom(this.http.delete('/api/research'))
+      this.researchState.set({ status: 'none' })
+      this.artifactNames.set([])
+    } catch {
+      // The Research may be partly deleted: show what is left of it.
+      this.researchState.reload()
+      this.artifactNames.reload()
     }
   }
 

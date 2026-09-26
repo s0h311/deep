@@ -73,6 +73,11 @@ function useRecommendation(page: HTMLElement): HTMLButtonElement | undefined {
   return [...page.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Use recommendation')
 }
 
+/** The page's button with the given label, if it shows one. */
+function button(page: HTMLElement, label: string): HTMLButtonElement | undefined {
+  return [...page.querySelectorAll('button')].find((item) => item.textContent?.trim() === label)
+}
+
 /** The stepper's current Step, the one marked aria-current. */
 function currentStep(page: HTMLElement): string | undefined {
   return page.querySelector('[aria-current="step"]')?.textContent?.replace(/\s+/g, ' ').trim()
@@ -317,6 +322,134 @@ describe('HomePage', () => {
         expect.stringContaining('Q1 Who is the audience? Recommended answer: Homeowners considering one.'),
       ])
       expect(useRecommendation(page)).toBeDefined()
+    })
+  })
+
+  describe('Resume', () => {
+    it('continues an Interrupted Research from its Artifacts and follows the resumed Steps', async () => {
+      const page = await renderPage({
+        state: { status: 'interrupted', step: 'retrieval', reason: 'The Retrieval agent failed twice.' },
+      })
+      const stream = stubStream()
+
+      button(page, 'Resume')?.click()
+      stream.push({ type: 'step', step: 'retrieval' })
+      await settle()
+
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/research',
+        expect.objectContaining({ method: 'POST', body: JSON.stringify({ message: '' }) }),
+      )
+      expect(currentStep(page)).toContain('Retrieval')
+      expect(currentStep(page)).toContain('Running')
+      expect(button(page, 'Resume')).toBeUndefined()
+    })
+
+    it.each<ResearchState>([
+      { status: 'none' },
+      { status: 'running', step: 'draft', round: 1 },
+      { status: 'awaiting_answer' },
+      { status: 'failed', reason: 'The Draft failed Review in every Round.' },
+      { status: 'completed' },
+    ])('is not offered when the Research is $status', async (state) => {
+      const page = await renderPage({ state })
+
+      expect(button(page, 'Resume')).toBeUndefined()
+    })
+  })
+
+  describe('Reset', () => {
+    it('offers Reset while a Step is running', async () => {
+      const page = await renderPage({ state: { status: 'running', step: 'retrieval' } })
+
+      expect(button(page, 'Reset')?.disabled).toBe(false)
+    })
+
+    it('offers a Failed Research Reset and nothing else', async () => {
+      const page = await renderPage({ state: { status: 'failed', reason: 'The Draft failed Review in every Round.' } })
+
+      expect([...page.querySelectorAll('button')].map((item) => item.textContent?.trim())).toEqual(['Reset'])
+      expect(page.querySelector('textarea[name="message"]')).toBeNull()
+    })
+
+    it('asks for confirmation and deletes nothing when cancelled', async () => {
+      const page = await renderPage({ state: { status: 'completed' }, artifacts: ['q.report.md'] })
+
+      button(page, 'Reset')?.click()
+      TestBed.tick()
+
+      expect(page.querySelector('[role="alertdialog"]')?.textContent).toContain('This deletes every Artifact.')
+
+      button(page, 'Cancel')?.click()
+      TestBed.tick()
+
+      expect(page.querySelector('[role="alertdialog"]')).toBeNull()
+      TestBed.inject(HttpTestingController).expectNone({ method: 'DELETE', url: '/api/research' })
+      expect(page.textContent).toContain('q.report.md')
+    })
+
+    it('deletes the Research once confirmed and shows the empty state', async () => {
+      const page = await renderPage({ state: { status: 'completed' }, artifacts: ['q.report.md'] })
+
+      button(page, 'Reset')?.click()
+      TestBed.tick()
+      button(page, 'Delete')?.click()
+      TestBed.inject(HttpTestingController)
+        .expectOne({ method: 'DELETE', url: '/api/research' })
+        .flush(null, { status: 204, statusText: 'No Content' })
+      await settle()
+
+      expect(page.textContent).toContain('What do you want to research?')
+      expect(page.textContent).not.toContain('q.report.md')
+      expect(page.querySelector('[role="alertdialog"]')).toBeNull()
+    })
+
+    it('cancels the stream the page is reading and shows the empty state', async () => {
+      const page = await renderPage({ state: { status: 'none' } })
+      const stream = stubStream()
+      send(page, 'How do heat pumps work?')
+      stream.push({ type: 'step', step: 'grilling' })
+      await settle()
+      TestBed.inject(HttpTestingController)
+        .expectOne({ method: 'GET', url: GRILLING_TRANSCRIPT_URL })
+        .flush({ question: 'How do heat pumps work?', turns: [] })
+      await settle()
+
+      button(page, 'Reset')?.click()
+      TestBed.tick()
+      button(page, 'Delete')?.click()
+      TestBed.inject(HttpTestingController)
+        .expectOne({ method: 'DELETE', url: '/api/research' })
+        .flush(null, { status: 204, statusText: 'No Content' })
+      await settle()
+      stream.push({ type: 'step', step: 'failed', reason: 'The Research was reset.' })
+      await settle()
+
+      expect(stream.cancelled).toBe(true)
+      expect(page.textContent).toContain('What do you want to research?')
+      expect(thread(page)).toEqual([])
+      expect(currentStep(page)).toBeUndefined()
+      expect(page.querySelector<HTMLTextAreaElement>('textarea[name="message"]')?.disabled).toBe(false)
+      TestBed.inject(HttpTestingController).verify()
+    })
+
+    it('shows the Research as it is when the reset fails', async () => {
+      const page = await renderPage({ state: { status: 'completed' }, artifacts: ['q.report.md'] })
+      const http = TestBed.inject(HttpTestingController)
+
+      button(page, 'Reset')?.click()
+      TestBed.tick()
+      button(page, 'Delete')?.click()
+      http
+        .expectOne({ method: 'DELETE', url: '/api/research' })
+        .flush('Internal Server Error', { status: 500, statusText: 'Internal Server Error' })
+      await settle()
+      http.expectOne({ method: 'GET', url: '/api/research' }).flush({ status: 'completed' })
+      http.expectOne({ method: 'GET', url: '/api/research/artifacts' }).flush(['q.report.md'])
+      await settle()
+
+      expect(page.querySelector('app-stepper')?.textContent).toContain('Completed')
+      expect(page.textContent).toContain('q.report.md')
     })
   })
 
