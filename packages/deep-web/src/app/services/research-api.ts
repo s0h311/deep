@@ -1,15 +1,26 @@
 import { isPlatformBrowser } from '@angular/common'
 import { HttpClient, httpResource } from '@angular/common/http'
-import { computed, effect, inject, Injectable, PLATFORM_ID, signal, untracked } from '@angular/core'
+import {
+  computed,
+  effect,
+  inject,
+  Injectable,
+  linkedSignal,
+  PLATFORM_ID,
+  resource,
+  signal,
+  untracked,
+} from '@angular/core'
 import { firstValueFrom } from 'rxjs'
+import { Artifact, GRILLING_TRANSCRIPT, inStepOrder, ListedArtifact, Verdict } from '../models/artifact'
 import { GrillingTranscript } from '../models/grilling-transcript'
 import { ResearchState } from '../models/research-state'
 import { SourceCatalogue } from '../models/source-catalogue'
 
 /** How often a page that isn't reading a stream re-fetches a Running Research's state. */
 const POLL_INTERVAL = 2000
-/** The Source Catalogue Artifact's name after the Topic prefix. */
-const SOURCE_CATALOGUE_SUFFIX = '_source_catalogue.json'
+/** The front matter a Review keeps its verdict in. */
+const FRONT_MATTER = /^---\n[\s\S]*?\n---\n/
 
 /** An event on the stream of `POST /api/research`. */
 type ResearchEvent =
@@ -24,15 +35,54 @@ export class ResearchApi {
   private readonly artifactNames = httpResource<string[]>(() => '/api/research/artifacts')
   /** Whether the Research is in the Grilling Step, so the Grilling Transcript holds its chat thread. */
   private readonly grilling = computed(() => inGrilling(this.state()))
+  /** Whether the chat thread shows: during Grilling, or when the user opens the Grilling Transcript after it. */
+  private readonly threadShown = computed(() => {
+    const opened = this.opened()
+    return opened ? opened.kind === 'grilling_transcript' : this.grilling()
+  })
   private readonly transcript = httpResource<GrillingTranscript>(() =>
-    this.grilling() ? '/api/research/artifacts/grilling_transcript.json' : undefined,
+    this.threadShown() ? artifactUrl(GRILLING_TRANSCRIPT) : undefined,
   )
-  private readonly catalogueName = computed(() =>
-    this.artifacts().find((name) => name.endsWith(SOURCE_CATALOGUE_SUFFIX)),
-  )
+  private readonly catalogueName = computed(() => this.ordered().find(({ kind }) => kind === 'source_catalogue')?.name)
   private readonly catalogue = httpResource<SourceCatalogue>(() => {
     const name = this.catalogueName()
-    return name ? `/api/research/artifacts/${encodeURIComponent(name)}` : undefined
+    return name ? artifactUrl(name) : undefined
+  })
+  private readonly ordered = computed(() => inStepOrder(this.artifacts()))
+  /** The Reviews' names, unchanged by a reload that brings no new Review, so their verdicts aren't read again. */
+  private readonly reviewNames = computed(
+    () => this.ordered().flatMap(({ kind, name }) => (kind === 'review' ? [name] : [])),
+    { equal: (a, b) => a.join('/') === b.join('/') },
+  )
+  /** Each Review's verdict, by the Review's name. */
+  private readonly verdicts = resource({
+    params: () => (this.reviewNames().length ? this.reviewNames() : undefined),
+    loader: async ({ params }) =>
+      new Map(
+        await Promise.all(
+          params.map(
+            async (name) =>
+              [
+                name,
+                verdict(await firstValueFrom(this.http.get(artifactUrl(name), { responseType: 'text' }))),
+              ] as const,
+          ),
+        ),
+      ),
+  })
+  /** The Report's name once the Research is Completed. */
+  private readonly report = computed(() =>
+    this.state().status === 'completed' ? this.ordered().find(({ kind }) => kind === 'report')?.name : undefined,
+  )
+  /** The name of the Artifact the user opened, and the Finding to scroll to if it is the Findings. The Report opens on its own once the Research is Completed. */
+  private readonly selection = linkedSignal<{ name: string; finding?: string } | undefined>(() => {
+    const report = this.report()
+    return report ? { name: report } : undefined
+  })
+  private readonly content = httpResource.text(() => {
+    // The Grilling Transcript opens as the chat thread.
+    const artifact = this.opened()
+    return artifact && artifact.kind !== 'grilling_transcript' ? artifactUrl(artifact.name) : undefined
   })
   /** Where the loaded Research stands, ignoring any reason, so a poll that finds it unchanged is no change. */
   private readonly step = computed(() => {
@@ -53,7 +103,31 @@ export class ResearchApi {
     this.researchState.hasValue() ? this.researchState.value() : { status: 'none' },
   )
   readonly artifacts = computed(() => (this.artifactNames.hasValue() ? this.artifactNames.value() : []))
-  /** The Grilling interview while the Research is in the Grilling Step. */
+  /** The Artifacts in Step order, each Review with its verdict once read. */
+  readonly artifactList = computed<ListedArtifact[]>(() => {
+    const verdicts = this.verdicts.hasValue() ? this.verdicts.value() : undefined
+
+    return this.ordered().map((artifact) => ({ ...artifact, verdict: verdicts?.get(artifact.name) }))
+  })
+  /** The open Artifact, if it still exists, with the Finding to scroll to if it is the Findings. */
+  readonly opened = computed<(Artifact & { finding?: string }) | undefined>(() => {
+    const selection = this.selection()
+    const artifact = this.ordered().find(({ name }) => name === selection?.name)
+
+    return artifact && { ...artifact, finding: selection?.finding }
+  })
+  /** The open Artifact as Markdown, once read: a JSON Artifact as a code block, and without any front matter. */
+  readonly openedMarkdown = computed(() => {
+    const name = this.opened()?.name
+
+    if (!name || !this.content.hasValue()) {
+      return undefined
+    }
+
+    const content = this.content.value()
+    return name.endsWith('.json') ? `\`\`\`json\n${content.trimEnd()}\n\`\`\`` : content.replace(FRONT_MATTER, '')
+  })
+  /** The Grilling interview while the Research is in the Grilling Step, or once the user opens it. */
   readonly grillingTranscript = computed(() => (this.transcript.hasValue() ? this.transcript.value() : undefined))
   /** The Source Catalogue's Sources, once its Step has written it. */
   readonly sources = computed(() => (this.catalogue.hasValue() ? this.catalogue.value().sources : undefined))
@@ -96,6 +170,20 @@ export class ResearchApi {
 
       seen = step
     })
+  }
+
+  /** Opens the Artifact with the given name. */
+  open(name: string): void {
+    this.selection.set({ name })
+  }
+
+  /** Opens the Findings scrolled to the Finding with the given ID. */
+  openFinding(finding: string): void {
+    const findings = this.ordered().find(({ kind }) => kind === 'findings')
+
+    if (findings) {
+      this.selection.set({ name: findings.name, finding })
+    }
   }
 
   /** Sends a message to the Research and follows the Steps it runs until its stream ends. */
@@ -150,6 +238,7 @@ export class ResearchApi {
       await firstValueFrom(this.http.delete('/api/research'))
       this.researchState.set({ status: 'none' })
       this.artifactNames.set([])
+      this.selection.set(undefined)
     } catch {
       // The Research may be partly deleted: show what is left of it.
       this.researchState.reload()
@@ -171,6 +260,15 @@ export class ResearchApi {
 
     this.researchState.set(stateAt(event))
   }
+}
+
+function artifactUrl(name: string): string {
+  return `/api/research/artifacts/${encodeURIComponent(name)}`
+}
+
+/** A Review's verdict, from its front matter. */
+function verdict(review: string): Verdict | undefined {
+  return review.match(/^---\nverdict: (pass|fail)\n/)?.[1] as Verdict | undefined
 }
 
 /** The Grilling Transcript with its last question answered, if that question was still unanswered. */

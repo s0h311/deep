@@ -45,18 +45,22 @@
       </div>
     </div>
     }
-    <section>
-      <h2 class="text-sm font-medium text-muted">Artifacts</h2>
-      <ul class="mt-2 space-y-1">
-        @for (name of research.artifacts(); track name) {
-        <li class="font-mono text-sm">{{ name }}</li>
-        }
-      </ul>
-    </section>
+    <app-artifact-list
+      [artifacts]="research.artifactList()"
+      [selected]="research.opened()?.name"
+      (opened)="research.open($event)"
+    />
   </aside>
   <section class="flex min-h-64 flex-col gap-4 rounded-lg border border-line bg-elevated p-6">
     @if (research.state().status === 'none') {
     <h1 class="text-xl font-semibold">What do you want to research?</h1>
+    } @else if (research.openedMarkdown(); as markdown) {
+    <app-markdown-view
+      [markdown]="markdown"
+      [citations]="research.opened()?.kind === 'draft' || research.opened()?.kind === 'report'"
+      [finding]="research.opened()?.finding"
+      (citationFollowed)="research.openFinding($event)"
+    />
     } @else if (research.grillingTranscript(); as transcript) {
     <app-grilling-thread
       [transcript]="transcript"

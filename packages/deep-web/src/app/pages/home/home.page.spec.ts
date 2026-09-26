@@ -6,8 +6,39 @@ import { ResearchState } from '../../models/research-state'
 import { stubFailedSend, stubStream } from '../../../testing/fake-stream'
 import { HomePage } from './home.page'
 
-const GRILLING_TRANSCRIPT_URL = '/api/research/artifacts/grilling_transcript.json'
+const ARTIFACT_URL = '/api/research/artifacts/'
+const GRILLING_TRANSCRIPT_URL = `${ARTIFACT_URL}grilling_transcript.json`
 const SOURCE_CATALOGUE = 'heat_pumps_source_catalogue.json'
+/** Every Artifact of a Research whose second Round passed Review, as the server lists them: sorted by name. */
+const ALL_ARTIFACTS = [
+  'grilling_transcript.json',
+  'heat_pumps_draft_1.md',
+  'heat_pumps_draft_2.md',
+  'heat_pumps_findings.md',
+  'heat_pumps_grilling_protocol.md',
+  'heat_pumps_report.md',
+  'heat_pumps_review_1.md',
+  'heat_pumps_review_2.md',
+  SOURCE_CATALOGUE,
+]
+const FINDINGS = `# Findings
+
+## F1
+
+Heat pumps move heat.
+
+URL: https://energy.gov/heat-pumps
+
+> A heat pump moves heat rather than generating it.
+
+## F2
+
+They cut energy use.
+
+URL: https://energy.gov/savings
+
+> Heat pumps can reduce electricity use for heating by about 50%.
+`
 
 /** A Grilling Transcript whose first question is still unanswered. */
 const FIRST_QUESTION: GrillingTranscript = {
@@ -15,12 +46,21 @@ const FIRST_QUESTION: GrillingTranscript = {
   turns: [{ question: 'Who is the audience?', recommendedAnswer: 'Homeowners considering one.' }],
 }
 
-async function renderPage(api: {
+/** The faked API's Research: its state and Artifacts. */
+type FakeResearch = {
   state?: ResearchState
   artifacts?: string[]
   transcript?: GrillingTranscript
   sources?: string[]
-}) {
+  /** The content of Markdown Artifacts, by name. */
+  contents?: Record<string, string>
+}
+
+/** The Research the faked API serves in the current test. */
+let research: FakeResearch = {}
+
+async function renderPage(api: FakeResearch) {
+  research = api
   TestBed.configureTestingModule({ providers: [provideHttpClient(), provideHttpClientTesting()] })
   const fixture = TestBed.createComponent(HomePage)
   const http = TestBed.inject(HttpTestingController)
@@ -28,17 +68,36 @@ async function renderPage(api: {
   http.expectOne({ method: 'GET', url: '/api/research' }).flush(api.state ?? { status: 'none' })
   http.expectOne({ method: 'GET', url: '/api/research/artifacts' }).flush(api.artifacts ?? [])
   await settle()
-  // During Grilling the page reads the Grilling Transcript to build the chat thread.
-  for (const request of http.match({ method: 'GET', url: GRILLING_TRANSCRIPT_URL })) {
-    request.flush(api.transcript ?? FIRST_QUESTION)
-  }
-  // Once the Source Catalogue exists, the page reads it for its panel.
-  for (const request of http.match({ method: 'GET', url: `/api/research/artifacts/${SOURCE_CATALOGUE}` })) {
-    request.flush({ sources: api.sources ?? [] })
-  }
+  await answerArtifactReads()
   await fixture.whenStable()
   http.verify()
   return fixture.nativeElement as HTMLElement
+}
+
+/** Answers every read of a single Artifact the page makes, including reads that follow from earlier answers. */
+async function answerArtifactReads(): Promise<void> {
+  const api = research
+  const http = TestBed.inject(HttpTestingController)
+  let requests = http.match((request) => request.method === 'GET' && request.url.startsWith(ARTIFACT_URL))
+
+  while (requests.length) {
+    for (const request of requests) {
+      const name = decodeURIComponent(request.request.url.slice(ARTIFACT_URL.length))
+
+      if (name === 'grilling_transcript.json') {
+        // The Grilling Transcript builds the chat thread.
+        request.flush(api.transcript ?? FIRST_QUESTION)
+      } else if (name === SOURCE_CATALOGUE) {
+        // The Source Catalogue fills its panel.
+        request.flush({ sources: api.sources ?? [] })
+      } else {
+        request.flush(api.contents?.[name] ?? `# ${name}`)
+      }
+    }
+
+    await settle()
+    requests = http.match((request) => request.method === 'GET' && request.url.startsWith(ARTIFACT_URL))
+  }
 }
 
 /**
@@ -64,18 +123,21 @@ function send(page: HTMLElement, message: string): void {
   button.click()
 }
 
-/** The chat thread's messages, in order, each as its lines of text joined by single spaces. */
+/** The chat thread's messages, in order, each as its text. */
 function thread(page: HTMLElement): string[] {
-  return [...page.querySelectorAll('app-grilling-thread li')].map((item) => {
-    const texts: string[] = []
-    const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT)
+  return [...page.querySelectorAll('app-grilling-thread li')].map(text)
+}
 
-    while (walker.nextNode()) {
-      texts.push(walker.currentNode.textContent ?? '')
-    }
+/** The element's lines of text joined by single spaces. */
+function text(element: Element): string {
+  const texts: string[] = []
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT)
 
-    return texts.join(' ').replace(/\s+/g, ' ').trim()
-  })
+  while (walker.nextNode()) {
+    texts.push(walker.currentNode.textContent ?? '')
+  }
+
+  return texts.join(' ').replace(/\s+/g, ' ').trim()
 }
 
 /** The "Use recommendation" button, if the page shows one. */
@@ -94,6 +156,31 @@ function sources(page: HTMLElement): { text: string; href?: string }[] {
     text: item.textContent?.trim() ?? '',
     href: item.querySelector('a')?.getAttribute('href') ?? undefined,
   }))
+}
+
+/** The Artifact list's entries, in order, each as its label and any badge. */
+function artifactList(page: HTMLElement): string[] {
+  return [...page.querySelectorAll('app-artifact-list li')].map(text)
+}
+
+/** Opens the Artifact with the given label from the Artifact list. */
+async function open(page: HTMLElement, label: string): Promise<void> {
+  const entry = [...page.querySelectorAll<HTMLButtonElement>('app-artifact-list button')].find((item) =>
+    item.textContent?.trim().startsWith(label),
+  )
+
+  if (!entry) {
+    throw new Error(`The Artifact list has no ${label}.`)
+  }
+
+  entry.click()
+  await settle()
+  await answerArtifactReads()
+}
+
+/** The Artifact viewer, showing the open Artifact as rendered Markdown. */
+function viewer(page: HTMLElement): HTMLElement | null {
+  return page.querySelector('app-markdown-view')
 }
 
 /** The stepper's current Step, the one marked aria-current. */
@@ -322,11 +409,244 @@ describe('HomePage', () => {
     })
   })
 
-  it("shows the names of the Research's Artifacts", async () => {
-    const page = await renderPage({ artifacts: ['q.gp.md', 'q.sc.json'] })
+  describe('Artifacts', () => {
+    it('lists the Artifacts in Step order with readable labels', async () => {
+      const page = await renderPage({ state: { status: 'interrupted', step: 'retrieval' }, artifacts: ALL_ARTIFACTS })
 
-    expect(page.textContent).toContain('q.gp.md')
-    expect(page.textContent).toContain('q.sc.json')
+      expect(artifactList(page)).toEqual([
+        'Grilling Transcript',
+        'Grilling Protocol',
+        'Source Catalogue',
+        'Findings',
+        'Round 1 · Draft',
+        'Round 1 · Review',
+        'Round 2 · Draft',
+        'Round 2 · Review',
+        'Report',
+      ])
+    })
+
+    it("shows each Review's verdict as a pass or fail badge", async () => {
+      const page = await renderPage({
+        state: { status: 'completed' },
+        artifacts: ALL_ARTIFACTS,
+        contents: {
+          'heat_pumps_review_1.md': '---\nverdict: fail\n---\n\n# Review 1\n',
+          'heat_pumps_review_2.md': '---\nverdict: pass\n---\n\n# Review 2\n',
+        },
+      })
+
+      expect(artifactList(page)).toContain('Round 1 · Review Fail')
+      expect(artifactList(page)).toContain('Round 2 · Review Pass')
+      expect(artifactList(page)).toContain('Round 2 · Draft')
+    })
+
+    it('adds the Artifact a Step writes to the list, without a reload', async () => {
+      const artifacts = ['grilling_transcript.json', 'heat_pumps_grilling_protocol.md', SOURCE_CATALOGUE]
+      const page = await renderPage({ state: { status: 'interrupted', step: 'retrieval' }, artifacts })
+      const stream = stubStream()
+
+      button(page, 'Resume')?.click()
+      stream.push({ type: 'step', step: 'retrieval' })
+      await settle()
+      TestBed.inject(HttpTestingController)
+        .expectOne({ method: 'GET', url: '/api/research/artifacts' })
+        .flush(artifacts)
+      stream.push({ type: 'step', step: 'draft', round: 1 })
+      await settle()
+      TestBed.inject(HttpTestingController)
+        .expectOne({ method: 'GET', url: '/api/research/artifacts' })
+        .flush([...artifacts, 'heat_pumps_findings.md'])
+      await settle()
+
+      expect(artifactList(page)).toEqual(['Grilling Transcript', 'Grilling Protocol', 'Source Catalogue', 'Findings'])
+    })
+
+    it('renders an opened Artifact as sanitised Markdown, also while a Step is running', async () => {
+      const api: FakeResearch = {
+        state: { status: 'running', step: 'retrieval' },
+        artifacts: ['grilling_transcript.json', 'heat_pumps_grilling_protocol.md'],
+        contents: {
+          'heat_pumps_grilling_protocol.md':
+            '# Grilling Protocol\n\n## Audience\n\n**Homeowners** in *Europe*.\n\n<img src="x.png" onerror="alert(1)"><script>alert(2)</script>',
+        },
+      }
+      const page = await renderPage(api)
+
+      await open(page, 'Grilling Protocol')
+
+      expect(viewer(page)?.querySelector('h1')?.textContent).toBe('Grilling Protocol')
+      expect(viewer(page)?.querySelector('h2')?.textContent).toBe('Audience')
+      expect(viewer(page)?.querySelector('strong')?.textContent).toBe('Homeowners')
+      expect(viewer(page)?.querySelector('script')).toBeNull()
+      expect(viewer(page)?.querySelector('img')?.getAttribute('onerror')).toBeNull()
+    })
+
+    it('shows a Review without the front matter its verdict badge comes from', async () => {
+      const api: FakeResearch = {
+        state: { status: 'running', step: 'draft', round: 2 },
+        artifacts: ['heat_pumps_review_1.md'],
+        contents: {
+          'heat_pumps_review_1.md': '---\nverdict: fail\n---\n\n# Review 1\n\n## Offending Claims\n\nNone.\n',
+        },
+      }
+      const page = await renderPage(api)
+
+      await open(page, 'Round 1 · Review')
+
+      expect(viewer(page)?.querySelector('h1')?.textContent).toBe('Review 1')
+      expect(viewer(page)?.textContent).not.toContain('verdict')
+      expect(viewer(page)?.querySelector('hr')).toBeNull()
+    })
+
+    it('opens the Grilling Transcript as a read-only Q&A thread after Grilling', async () => {
+      const api: FakeResearch = {
+        state: { status: 'running', step: 'retrieval' },
+        artifacts: ['grilling_transcript.json', 'heat_pumps_grilling_protocol.md'],
+        transcript: {
+          question: 'How do heat pumps work?',
+          turns: [{ question: 'Who is the audience?', recommendedAnswer: 'Homeowners.', answer: 'Installers.' }],
+        },
+      }
+      const page = await renderPage(api)
+      await open(page, 'Grilling Protocol')
+
+      await open(page, 'Grilling Transcript')
+
+      expect(viewer(page)).toBeNull()
+      expect(thread(page)).toEqual([
+        'How do heat pumps work?',
+        'Q1 Who is the audience? Recommended answer: Homeowners.',
+        'Installers.',
+      ])
+      expect(useRecommendation(page)).toBeUndefined()
+    })
+
+    it('opens the Report of a Completed Research', async () => {
+      const page = await renderPage({
+        state: { status: 'completed' },
+        artifacts: ALL_ARTIFACTS,
+        contents: { 'heat_pumps_report.md': '# Report\n\n## Summary\n\nHeat pumps move heat [F1].\n' },
+      })
+
+      expect(page.querySelector('app-artifact-list [aria-current]')?.textContent?.trim()).toBe('Report')
+      expect(viewer(page)?.querySelector('h2')?.textContent).toBe('Summary')
+      expect(viewer(page)?.querySelector('a')?.getAttribute('href')).toBe('#F1')
+    })
+
+    it('opens the Report once the Research completes', async () => {
+      const artifacts = ALL_ARTIFACTS.filter((name) => name !== 'heat_pumps_report.md')
+      const api: FakeResearch = {
+        state: { status: 'interrupted', step: 'review', round: 2 },
+        artifacts,
+        contents: { 'heat_pumps_report.md': '# Report\n\n## Summary\n\nHeat pumps move heat.\n' },
+      }
+      const page = await renderPage(api)
+      await open(page, 'Findings')
+      const stream = stubStream()
+
+      button(page, 'Resume')?.click()
+      stream.push({ type: 'step', step: 'review', round: 2 })
+      await settle()
+      TestBed.inject(HttpTestingController)
+        .expectOne({ method: 'GET', url: '/api/research/artifacts' })
+        .flush(artifacts)
+      stream.push({ type: 'step', step: 'completed' })
+      stream.close()
+      await settle()
+      TestBed.inject(HttpTestingController)
+        .expectOne({ method: 'GET', url: '/api/research/artifacts' })
+        .flush(ALL_ARTIFACTS)
+      await settle()
+      await answerArtifactReads()
+
+      expect(page.querySelector('app-artifact-list [aria-current]')?.textContent?.trim()).toBe('Report')
+      expect(viewer(page)?.querySelector('h1')?.textContent).toBe('Report')
+    })
+
+    it('shows a JSON Artifact as its JSON', async () => {
+      const api: FakeResearch = {
+        state: { status: 'running', step: 'retrieval' },
+        artifacts: [SOURCE_CATALOGUE],
+        sources: ['energy.gov'],
+      }
+      const page = await renderPage(api)
+
+      await open(page, 'Source Catalogue')
+
+      expect(JSON.parse(viewer(page)?.querySelector('pre')?.textContent ?? '')).toEqual({ sources: ['energy.gov'] })
+    })
+
+    describe('[Fn] citations', () => {
+      const api: FakeResearch = {
+        state: { status: 'running', step: 'review', round: 1 },
+        artifacts: [
+          'heat_pumps_draft_1.md',
+          'heat_pumps_findings.md',
+          'heat_pumps_grilling_protocol.md',
+          'heat_pumps_review_1.md',
+        ],
+        contents: {
+          'heat_pumps_draft_1.md':
+            '# Report\n\n## Summary\n\nHeat pumps move heat [F1] and cut energy use [F1, F2].\n\n## Sources\n\n- [F2] https://energy.gov/savings\n',
+          'heat_pumps_findings.md': FINDINGS,
+          'heat_pumps_review_1.md':
+            '---\nverdict: fail\n---\n\n# Review 1\n\n## Offending Claims\n\n- They cut energy use by 90% [F2].\n',
+        },
+      }
+
+      // jsdom doesn't scroll, so a test that follows a citation stubs it.
+      afterEach(() => delete (Element.prototype as Partial<Element>).scrollIntoView)
+
+      /** The open Artifact's links, each as its text and target. */
+      function links(page: HTMLElement): { text: string; href: string | null }[] {
+        return [...(viewer(page)?.querySelectorAll('a') ?? [])].map((link) => ({
+          text: link.textContent ?? '',
+          href: link.getAttribute('href'),
+        }))
+      }
+
+      it('link each Finding a Draft cites', async () => {
+        const page = await renderPage(api)
+
+        await open(page, 'Round 1 · Draft')
+
+        expect(links(page)).toEqual([
+          { text: 'F1', href: '#F1' },
+          { text: 'F1', href: '#F1' },
+          { text: 'F2', href: '#F2' },
+          { text: 'F2', href: '#F2' },
+          { text: 'https://energy.gov/savings', href: 'https://energy.gov/savings' },
+        ])
+        expect(viewer(page)?.textContent).toContain('Heat pumps move heat [F1] and cut energy use [F1, F2].')
+      })
+
+      it('open the Findings scrolled to the cited Finding', async () => {
+        const scrolled = vi.fn<(this: Element) => void>(function (this: Element) {})
+        Element.prototype.scrollIntoView = scrolled
+        const page = await renderPage(api)
+        await open(page, 'Round 1 · Draft')
+
+        viewer(page)
+          ?.querySelectorAll('a')[2]
+          ?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+        await settle()
+        await answerArtifactReads()
+
+        expect(viewer(page)?.querySelector('h1')?.textContent).toBe('Findings')
+        expect(page.querySelector('app-artifact-list [aria-current]')?.textContent?.trim()).toBe('Findings')
+        expect(scrolled.mock.contexts.map((heading) => heading.textContent)).toEqual(['F2'])
+      })
+
+      it('leave citations in other Artifacts as text', async () => {
+        const page = await renderPage(api)
+
+        await open(page, 'Round 1 · Review')
+
+        expect(viewer(page)?.textContent).toContain('They cut energy use by 90% [F2].')
+        expect(links(page)).toEqual([])
+      })
+    })
   })
 
   it('disables the message input while a Step is running', async () => {

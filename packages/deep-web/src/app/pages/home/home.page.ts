@@ -1,11 +1,13 @@
 import { Component, inject, signal } from '@angular/core'
+import { ArtifactList } from '../../components/artifact-list/artifact-list'
 import { GrillingThread } from '../../components/grilling-thread/grilling-thread'
+import { MarkdownView } from '../../components/markdown-view/markdown-view'
 import { SourceCataloguePanel } from '../../components/source-catalogue-panel/source-catalogue-panel'
 import { Stepper } from '../../components/stepper/stepper'
 import { ResearchApi } from '../../services/research-api'
 
 @Component({
-  imports: [GrillingThread, SourceCataloguePanel, Stepper],
+  imports: [ArtifactList, GrillingThread, MarkdownView, SourceCataloguePanel, Stepper],
   templateUrl: 'home.page.html',
 })
 export class HomePage {
