@@ -62,15 +62,15 @@ function researchModel(
   }: {
     sources?: string[]
     findings?: Finding[]
-    draft?: (messages: BaseMessage[]) => Draft
+    draft?: (messages: BaseMessage[]) => Draft | Promise<Draft>
     review?: () => Review
   } = {},
 ) {
-  return scriptedChatModel((messages) => {
+  return scriptedChatModel(async (messages) => {
     const system = messages.find((message) => SystemMessage.isInstance(message))?.text ?? ''
 
     if (system.includes('Draft Step')) {
-      return structuredResponse(draft(messages))
+      return structuredResponse(await draft(messages))
     }
 
     if (system.includes('Review Step')) {
@@ -753,6 +753,83 @@ describe('Research', () => {
       await send(research, 'How do central banks set interest rates?')
 
       await expect(research.readArtifact(name())).rejects.toThrow(ArtifactNotFound)
+    })
+  })
+
+  describe('Reset', () => {
+    const conclusion = structuredResponse({
+      done: true,
+      topic: 'ECB rates',
+      protocol: {
+        scope: 'The ECB, 2025',
+        goal: 'Understand the latest rate decision',
+        audience: 'Pension fund trustees',
+        openAssumptions: [],
+      },
+    })
+
+    /** A model whose Draft agent never answers, signalling once the Draft Step is running. */
+    function stuckInDraft(): { model: ReturnType<typeof researchModel>; drafting: Promise<void> } {
+      const drafting = Promise.withResolvers<void>()
+      const model = researchModel(() => conclusion, {
+        draft: () => {
+          drafting.resolve()
+
+          return new Promise<Draft>(() => {})
+        },
+      })
+
+      return { model, drafting: drafting.promise }
+    }
+
+    test('reset during a running Step aborts it, ending its stream with failed, and leaves no Artifacts', async () => {
+      const { model, drafting } = stuckInDraft()
+      const research = createResearch({ model, root })
+      const events: ResearchEvent[] = []
+      const running = research.send('What did the ECB decide on rates in July 2025?', (event) => {
+        events.push(event)
+      })
+      await drafting
+
+      await research.reset()
+      await running
+
+      expect(events.at(-1)).toEqual({ type: 'step', step: 'failed', reason: expect.stringMatching(/reset/) })
+      expect(await research.listArtifacts()).toEqual([])
+    })
+
+    test('a message while a Step is running is rejected as a conflict', async () => {
+      const { model, drafting } = stuckInDraft()
+      const research = createResearch({ model, root })
+      const running = research.send('What did the ECB decide on rates in July 2025?', () => {})
+      await drafting
+
+      const error = await send(research, 'How do tides work?').catch((error: unknown) => error)
+
+      expect(error).toBeInstanceOf(ResearchConflict)
+      expect(error).toHaveProperty('message', expect.stringMatching(/running/))
+      await research.reset()
+      await running
+    })
+
+    test('after a reset, the next message starts a new Research from Grilling', async () => {
+      const model = researchModel((messages) =>
+        messages.some((message) => HumanMessage.isInstance(message) && message.text.includes('How do tides work?'))
+          ? structuredResponse({ question: 'Which coast?', recommendedAnswer: 'The North Sea' })
+          : conclusion,
+      )
+      const research = createResearch({ model, root })
+      await send(research, 'What did the ECB decide on rates in July 2025?')
+
+      await research.reset()
+      const events = await send(research, 'How do tides work?')
+
+      expect(events).toEqual([
+        { type: 'step', step: 'grilling' },
+        { type: 'text', text: expect.stringMatching(/Q1[\s\S]*Which coast\?/) },
+        { type: 'step', step: 'awaiting_answer' },
+      ])
+      expect(await research.listArtifacts()).toEqual(['grilling_transcript.json'])
     })
   })
 })

@@ -1,13 +1,12 @@
 import { defineHandler } from 'nitro'
 import { EventStream, HTTPError, readValidatedBody } from 'nitro/h3'
 import { z } from 'zod'
-import { createResearch, type Emit, ResearchConflict } from '../../features/research/index.ts'
+import { type Emit, ResearchConflict } from '../../features/research/index.ts'
+import { research } from '../../features/research/instance.ts'
 
 const request = z.object({
   message: z.string(),
 })
-
-const research = createResearch()
 
 export default defineHandler(async (event) => {
   const { message } = await readValidatedBody(event, request)

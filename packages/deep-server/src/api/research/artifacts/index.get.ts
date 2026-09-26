@@ -1,6 +1,4 @@
 import { defineHandler } from 'nitro'
-import { createResearch } from '../../../features/research/index.ts'
-
-const research = createResearch()
+import { research } from '../../../features/research/instance.ts'
 
 export default defineHandler(async () => await research.listArtifacts())

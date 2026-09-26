@@ -1,8 +1,7 @@
 import { defineHandler } from 'nitro'
 import { getRouterParam, HTTPError } from 'nitro/h3'
-import { ArtifactNotFound, createResearch } from '../../../features/research/index.ts'
-
-const research = createResearch()
+import { ArtifactNotFound } from '../../../features/research/index.ts'
+import { research } from '../../../features/research/instance.ts'
 
 export default defineHandler(async (event) => {
   const name = getRouterParam(event, 'name', { decode: true }) ?? ''
