@@ -17,12 +17,15 @@ const citations: TokenizerAndRendererExtension = {
     `[${(token['ids'] as string[]).map((id) => `<a href="#${id}">${id}</a>`).join(', ')}]`,
 }
 
+/** A citation the user clicked: the cited Finding's ID and the link that shows it. */
+export type Citation = { finding: string; link: HTMLElement }
+
 const plain = new Marked()
 const cited = new Marked({ extensions: [citations] })
 
 /**
  * An Artifact rendered from Markdown; Angular sanitises the HTML, so markup in the Artifact can't run scripts.
- * With `citations`, `[Fn]` links to that Finding; following it emits the Finding's ID instead of navigating.
+ * With `citations`, `[Fn]` links to that Finding; clicking it emits the citation instead of navigating.
  */
 @Component({
   selector: 'app-markdown-view',
@@ -34,8 +37,8 @@ export class MarkdownView {
   readonly citations = input(false)
   /** The ID of the Finding to scroll to, whose `## Fn` heading this Artifact has. */
   readonly finding = input<string>()
-  /** Emits the ID of the Finding whose citation the user followed. */
-  readonly citationFollowed = output<string>()
+  /** Emits the citation the user clicked. */
+  readonly citationClicked = output<Citation>()
 
   protected readonly html = computed(() => (this.citations() ? cited : plain).parse(this.markdown(), { async: false }))
 
@@ -56,9 +59,9 @@ export class MarkdownView {
     const link = event.target instanceof Element ? event.target.closest('a') : null
     const finding = this.citations() ? link?.getAttribute('href')?.match(/^#(F\d+)$/)?.[1] : undefined
 
-    if (finding) {
+    if (link && finding) {
       event.preventDefault()
-      this.citationFollowed.emit(finding)
+      this.citationClicked.emit({ finding, link })
     }
   }
 }

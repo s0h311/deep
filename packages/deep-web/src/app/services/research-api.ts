@@ -13,6 +13,7 @@ import {
 } from '@angular/core'
 import { firstValueFrom } from 'rxjs'
 import { Artifact, GRILLING_TRANSCRIPT, inStepOrder, ListedArtifact, Verdict } from '../models/artifact'
+import { parseFindings } from '../models/finding'
 import { GrillingTranscript } from '../models/grilling-transcript'
 import { ResearchState } from '../models/research-state'
 import { SourceCatalogue } from '../models/source-catalogue'
@@ -77,13 +78,22 @@ export class ResearchApi {
     const name = this.report()
     return name ? artifactUrl(name) : undefined
   })
-  /** The name of the Artifact the user opened, and the Finding to scroll to if it is the Findings. */
-  private readonly selection = signal<{ name: string; finding?: string } | undefined>(undefined)
+  /**
+   * The name of the Artifact the user opened; for the Findings opened from a citation, the Finding to scroll to and the
+   * name of the Artifact the citation was in.
+   */
+  private readonly selection = signal<{ name: string; finding?: string; from?: string } | undefined>(undefined)
   /** Whether this page saw the Research go from Running to Completed and hasn't shown the Report since. */
   private readonly watchedCompletion = signal(false)
   private readonly content = httpResource.text(() => {
     const name = this.opened()?.name
     return name ? artifactUrl(name) : undefined
+  })
+  /** The Findings, read while a Draft or the Report is open, as their citations show them. */
+  private readonly findingsContent = httpResource.text(() => {
+    const cites = ['draft', 'report'].includes(this.opened()?.kind ?? '')
+    const name = this.ordered().find(({ kind }) => kind === 'findings')?.name
+    return cites && name ? artifactUrl(name) : undefined
   })
   /** A key for where the loaded Research stands, ignoring any reason, so a poll that finds it unchanged is no change. */
   private readonly stepKey = computed(() => {
@@ -115,13 +125,21 @@ export class ResearchApi {
       artifact.kind === 'grilling_transcript' ? [] : [{ ...artifact, verdict: verdicts?.get(artifact.name) }],
     )
   })
-  /** The open Artifact, if it still exists, with the Finding to scroll to if it is the Findings. */
-  readonly opened = computed<(Artifact & { finding?: string }) | undefined>(() => {
+  /**
+   * The open Artifact, if it still exists. For the Findings opened from a citation, the Finding to scroll to and the
+   * Artifact to go back to.
+   */
+  readonly opened = computed<(Artifact & { finding?: string; from?: Artifact }) | undefined>(() => {
     const selection = this.selection()
     const artifact = this.ordered().find(({ name }) => name === selection?.name)
+    const from = this.ordered().find(({ name }) => name === selection?.from)
 
-    return artifact && { ...artifact, finding: selection?.finding }
+    return artifact && { ...artifact, finding: selection?.finding, from }
   })
+  /** The Findings by ID while a Draft or the Report is open, once read. */
+  readonly findings = computed(() =>
+    this.findingsContent.hasValue() ? parseFindings(this.findingsContent.value()) : undefined,
+  )
   /** The open Artifact as Markdown, once read: a JSON Artifact as a code block, and without any front matter. */
   readonly openedMarkdown = computed(() => {
     const name = this.opened()?.name
@@ -221,12 +239,21 @@ export class ResearchApi {
     this.selection.set(undefined)
   }
 
-  /** Opens the Findings scrolled to the Finding with the given ID. */
+  /** Opens the Findings scrolled to the Finding with the given ID, to go back to the open Artifact from. */
   openFinding(finding: string): void {
     const findings = this.ordered().find(({ kind }) => kind === 'findings')
 
     if (findings) {
-      this.selection.set({ name: findings.name, finding })
+      this.selection.set({ name: findings.name, finding, from: this.opened()?.name })
+    }
+  }
+
+  /** Goes back from the Findings to the Artifact whose citation opened them. */
+  back(): void {
+    const from = this.opened()?.from
+
+    if (from) {
+      this.selection.set({ name: from.name })
     }
   }
 

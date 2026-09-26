@@ -1,7 +1,18 @@
-import { Component, computed, effect, inject, signal, untracked } from '@angular/core'
+import {
+  afterRenderEffect,
+  Component,
+  computed,
+  effect,
+  ElementRef,
+  inject,
+  linkedSignal,
+  signal,
+  untracked,
+  viewChild,
+} from '@angular/core'
 import { ArtifactList } from '../../components/artifact-list/artifact-list'
 import { GrillingThread } from '../../components/grilling-thread/grilling-thread'
-import { MarkdownView } from '../../components/markdown-view/markdown-view'
+import { Citation, MarkdownView } from '../../components/markdown-view/markdown-view'
 import { SourceCataloguePanel } from '../../components/source-catalogue-panel/source-catalogue-panel'
 import { Stepper } from '../../components/stepper/stepper'
 import { ResearchState } from '../../models/research-state'
@@ -9,9 +20,20 @@ import { ResearchApi } from '../../services/research-api'
 
 type DrawerTab = 'artifacts' | 'sources'
 
+/** The ID of a cited Finding shown in a popover under its citation, and where in the reader the popover is. */
+type CitationPopover = { finding: string; top: number; left: number }
+
+/** The citation popover's width in pixels (`w-80`), which keeps it inside the reader. */
+const POPOVER_WIDTH = 320
+
 @Component({
   imports: [ArtifactList, GrillingThread, MarkdownView, SourceCataloguePanel, Stepper],
   templateUrl: 'home.page.html',
+  host: {
+    // A click on a citation opens its popover and marks the click handled; any other click outside the popover closes it.
+    '(document:click)': 'dismissPopover($event)',
+    '(document:keydown.escape)': 'popover.set(undefined)',
+  },
 })
 export class HomePage {
   protected readonly research = inject(ResearchApi)
@@ -25,6 +47,25 @@ export class HomePage {
     { key: 'artifacts', label: 'Artifacts' },
     { key: 'sources', label: 'Sources' },
   ]
+  /** The drawer's reader, scrolling the open Artifact. */
+  private readonly reader = viewChild<ElementRef<HTMLElement>>('reader')
+  private readonly popoverElement = viewChild<ElementRef<HTMLElement>>('popover')
+  /** The citation popover the user opened last; opening another Artifact closes it. */
+  protected readonly popover = linkedSignal<string | undefined, CitationPopover | undefined>({
+    source: () => this.research.opened()?.name,
+    computation: () => undefined,
+  })
+  /** The Finding the popover shows: `null` if the Findings have no such Finding, `undefined` until they're read. */
+  protected readonly citedFinding = computed(() => {
+    const popover = this.popover()
+    const findings = this.research.findings()
+
+    return popover && findings ? (findings.get(popover.finding) ?? null) : undefined
+  })
+  /** Where the reader was scrolled in the Artifact the Findings were opened from. */
+  private returnScroll = 0
+  /** Where to scroll the reader once the Artifact gone back to is shown. */
+  private pendingScroll?: number
   /**
    * Whether the page offers the message input: to start a Research, answer a Grilling question, or wait for a running
    * Step. A Failed or Completed Research rejects a message and an Interrupted one ignores it, so they get none.
@@ -68,6 +109,16 @@ export class HomePage {
         untracked(() => this.readReport())
       }
     })
+
+    // After render, as the Artifact gone back to is read again and only scrolls once its Markdown is in the page.
+    afterRenderEffect(() => {
+      const reader = this.reader()?.nativeElement
+
+      if (reader && this.research.openedMarkdown() !== undefined && this.pendingScroll !== undefined) {
+        reader.scrollTop = this.pendingScroll
+        this.pendingScroll = undefined
+      }
+    })
   }
 
   /** Enter sends the message; Shift+Enter leaves the textarea to add a new line. */
@@ -105,6 +156,43 @@ export class HomePage {
   protected closeDrawer(): void {
     this.drawerOpen.set(false)
     this.research.close()
+  }
+
+  /** Opens the popover of a clicked citation under it, keeping it inside the reader. */
+  protected showCitation({ finding, link }: Citation): void {
+    const reader = this.reader()?.nativeElement
+
+    if (!reader) {
+      return
+    }
+
+    const box = reader.getBoundingClientRect()
+    const at = link.getBoundingClientRect()
+    this.popover.set({
+      finding,
+      top: at.bottom - box.top + reader.scrollTop + 6,
+      left: Math.max(8, Math.min(at.left - box.left, box.width - POPOVER_WIDTH - 8)),
+    })
+  }
+
+  protected dismissPopover(event: MouseEvent): void {
+    const inside = event.target instanceof Node && this.popoverElement()?.nativeElement.contains(event.target)
+
+    if (!event.defaultPrevented && !inside) {
+      this.popover.set(undefined)
+    }
+  }
+
+  /** Shows the Findings at the given Finding, remembering where the reader was to go back there. */
+  protected openInFindings(finding: string): void {
+    this.returnScroll = this.reader()?.nativeElement.scrollTop ?? 0
+    this.research.openFinding(finding)
+  }
+
+  /** Goes back from the Findings to the Artifact they were opened from, scrolled where it was. */
+  protected back(): void {
+    this.pendingScroll = this.returnScroll
+    this.research.back()
   }
 
   protected reset(): void {

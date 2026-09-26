@@ -256,6 +256,12 @@ function reportCard(page: HTMLElement): string | undefined {
   return card ? text(card) : undefined
 }
 
+/** The popover showing a cited Finding, as its text, if the page shows one. */
+function citationPopover(page: HTMLElement): string | undefined {
+  const popover = page.querySelector('[role="dialog"]')
+  return popover ? text(popover) : undefined
+}
+
 /** The stepper's current Step, the one marked aria-current. */
 function currentStep(page: HTMLElement): string | undefined {
   return page.querySelector('[aria-current="step"]')?.textContent?.replace(/\s+/g, ' ').trim()
@@ -759,21 +765,100 @@ describe('HomePage', () => {
         expect(viewer(page)?.textContent).toContain('Heat pumps move heat [F1] and cut energy use [F1, F2].')
       })
 
-      it('open the Findings scrolled to the cited Finding', async () => {
+      /** Clicks the open Artifact's link at the given index, as a click or tap on a citation does. */
+      async function cite(page: HTMLElement, index: number): Promise<void> {
+        viewer(page)
+          ?.querySelectorAll('a')
+          [index]?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+        await settle()
+      }
+
+      it("show the cited Finding's quote and Source in a popover, leaving the Draft where it was", async () => {
         const scrolled = vi.fn<(this: Element) => void>(function (this: Element) {})
         Element.prototype.scrollIntoView = scrolled
         const page = await renderPage(api)
         await open(page, 'Round 1 · Draft')
 
-        viewer(page)
-          ?.querySelectorAll('a')[2]
-          ?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+        await cite(page, 2)
+
+        expect(citationPopover(page)).toBe(
+          'F2 Heat pumps can reduce electricity use for heating by about 50%. https://energy.gov/savings Open in Findings →',
+        )
+        expect(readerTitle(page)).toBe('Round 1 · Draft')
+        expect(scrolled).not.toHaveBeenCalled()
+      })
+
+      it('close the popover on Esc', async () => {
+        const page = await renderPage(api)
+        await open(page, 'Round 1 · Draft')
+        await cite(page, 0)
+
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+        await settle()
+
+        expect(citationPopover(page)).toBeUndefined()
+      })
+
+      it('close the popover on a click outside it', async () => {
+        const page = await renderPage(api)
+        await open(page, 'Round 1 · Draft')
+        await cite(page, 0)
+
+        viewer(page)?.querySelector('p')?.click()
+        await settle()
+
+        expect(citationPopover(page)).toBeUndefined()
+      })
+
+      it('show the Findings at the cited Finding from the popover, and go back to the Draft where it was', async () => {
+        const scrolled = vi.fn<(this: Element) => void>(function (this: Element) {})
+        Element.prototype.scrollIntoView = scrolled
+        const page = await renderPage(api)
+        await open(page, 'Round 1 · Draft')
+        // jsdom doesn't lay out, so the reader is scrolled by hand.
+        const reader = viewer(page)?.parentElement as HTMLElement
+        Object.defineProperty(reader, 'scrollTop', { value: 240, writable: true })
+        await cite(page, 2)
+
+        button(page, 'Open in Findings →')?.click()
         await settle()
         await answerArtifactReads()
 
-        expect(viewer(page)?.querySelector('h1')?.textContent).toBe('Findings')
         expect(readerTitle(page)).toBe('Findings')
         expect(scrolled.mock.contexts.map((heading) => heading.textContent)).toEqual(['F2'])
+        expect(citationPopover(page)).toBeUndefined()
+
+        reader.scrollTop = 900
+        button(page, '← Back to Round 1 · Draft')?.click()
+        await settle()
+        await answerArtifactReads()
+
+        expect(readerTitle(page)).toBe('Round 1 · Draft')
+        expect(viewer(page)?.parentElement?.scrollTop).toBe(240)
+        expect(iconButton(page, 'All Artifacts')).not.toBeNull()
+      })
+
+      it('show the cited Findings of the Report, and say when a Finding does not exist', async () => {
+        const page = await renderPage({
+          state: { status: 'completed' },
+          artifacts: ALL_ARTIFACTS,
+          contents: {
+            'heat_pumps_report.md': '# Report\n\n## Summary\n\nHeat pumps move heat [F1] even when cold [F7].\n',
+            'heat_pumps_findings.md': FINDINGS,
+          },
+        })
+        await open(page, 'Report')
+
+        await cite(page, 0)
+
+        expect(citationPopover(page)).toBe(
+          'F1 A heat pump moves heat rather than generating it. https://energy.gov/heat-pumps Open in Findings →',
+        )
+
+        await cite(page, 1)
+
+        expect(citationPopover(page)).toBe('F7 Finding not found.')
+        expect(readerTitle(page)).toBe('Report')
       })
 
       it('leave citations in other Artifacts as text', async () => {
