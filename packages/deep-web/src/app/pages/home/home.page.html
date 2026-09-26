@@ -10,6 +10,31 @@
       </ul>
     </section>
   </aside>
-  <section class="min-h-64 rounded-lg border border-line bg-elevated p-6"></section>
+  <section class="flex min-h-64 flex-col gap-4 rounded-lg border border-line bg-elevated p-6">
+    @if (research.state().status === 'none') {
+    <h1 class="text-xl font-semibold">What do you want to research?</h1>
+    }
+    <form
+      class="mt-auto flex items-end gap-2"
+      (submit)="send($event)"
+    >
+      <textarea
+        name="message"
+        rows="2"
+        aria-label="Message"
+        class="min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none disabled:bg-surface disabled:text-muted"
+        [value]="message()"
+        [disabled]="research.busy()"
+        (input)="message.set($any($event.target).value)"
+      ></textarea>
+      <button
+        type="submit"
+        class="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+        [disabled]="research.busy()"
+      >
+        Send
+      </button>
+    </form>
+  </section>
   <aside class="rounded-lg border border-line bg-surface p-4"></aside>
 </main>
