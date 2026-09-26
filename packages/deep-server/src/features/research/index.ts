@@ -243,6 +243,9 @@ export function createResearch({
 
     // At the cap, the agent is told to conclude, and only a conclusion is accepted.
     const mustConclude = transcript.turns.length >= MAX_GRILLING_QUESTIONS
+    // Saved before the agent runs, so an Interrupted Grilling keeps the question and the latest answer.
+    await saveTranscript(transcript)
+
     const outcome = await retried({ step: 'Grilling', signal: context.signal }, async () =>
       (mustConclude ? grillingConclusion : grillingOutcome).parse(
         await runAgent({
@@ -255,8 +258,6 @@ export function createResearch({
         }),
       ),
     )
-
-    await mkdir(root, { recursive: true })
 
     if ('done' in outcome) {
       const topic = slugify(outcome.topic)
@@ -272,7 +273,7 @@ export function createResearch({
 
     transcript.turns.push(outcome)
 
-    await writeFile(join(root, GRILLING_TRANSCRIPT), JSON.stringify(transcript, null, 2))
+    await saveTranscript(transcript)
 
     await context.emit({ type: 'text', text: renderQuestion(outcome, transcript.turns.length) })
     await context.emit({ type: 'step', step: 'awaiting_answer' })
@@ -438,6 +439,11 @@ export function createResearch({
     }
   }
 
+  async function saveTranscript(transcript: GrillingTranscript): Promise<void> {
+    await mkdir(root, { recursive: true })
+    await writeFile(join(root, GRILLING_TRANSCRIPT), JSON.stringify(transcript, null, 2))
+  }
+
   /** Advances the Research from the state its Artifacts describe. */
   async function advance(message: string, context: StepContext): Promise<void> {
     const names = await artifactNames()
@@ -445,13 +451,15 @@ export function createResearch({
     let topic = protocol?.slice(0, -GRILLING_PROTOCOL_SUFFIX.length)
 
     if (topic === undefined) {
-      const transcript = await readTranscript()
+      const transcript = (await readTranscript()) ?? { question: message, turns: [] }
+      const last = transcript.turns.at(-1)
 
-      if (transcript) {
-        defined(transcript.turns.at(-1)).answer = message
+      // Only an unanswered question takes the message; otherwise Grilling was Interrupted and the message is ignored.
+      if (last && last.answer === undefined) {
+        last.answer = message
       }
 
-      topic = await grill(transcript ?? { question: message, turns: [] }, context)
+      topic = await grill(transcript, context)
 
       if (topic === undefined) {
         return

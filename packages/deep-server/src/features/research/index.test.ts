@@ -716,6 +716,67 @@ describe('Research', () => {
         { type: 'step', step: 'completed' },
       ])
     })
+
+    describe('during Grilling', () => {
+      /** Asks one question, errors on the given calls, and concludes once the question is answered. */
+      function interruptedGrilling(failingCalls: number[]): {
+        model: ReturnType<typeof researchModel>
+        seen: string[]
+      } {
+        const seen: string[] = []
+        let calls = 0
+        const model = researchModel((messages) => {
+          calls += 1
+          const message = defined(messages.find((message) => HumanMessage.isInstance(message))).text
+          seen.push(message)
+
+          if (failingCalls.includes(calls)) {
+            throw new Error('overloaded')
+          }
+
+          return message.includes('\nAnswer: ')
+            ? conclusion
+            : structuredResponse({ question: 'Who is the audience?', recommendedAnswer: 'Retail investors' })
+        })
+
+        return { model, seen }
+      }
+
+      test('an interrupted answer is kept, and the next message resumes Grilling with it instead of answering', async () => {
+        const { model, seen } = interruptedGrilling([2, 3])
+        const research = createResearch({ model, root })
+        await send(research, 'What did the ECB decide on rates in July 2025?')
+        await send(research, 'Pension fund trustees')
+
+        const events = await send(research, 'Go on')
+
+        expect(events.slice(0, 2)).toEqual([
+          { type: 'step', step: 'grilling' },
+          { type: 'step', step: 'source_catalogue' },
+        ])
+        expect(seen.at(-1)).toContain('Answer: Pension fund trustees')
+        expect(seen.at(-1)).not.toContain('Go on')
+      })
+
+      test('an interrupted first turn keeps the question, and the next message resumes Grilling with it', async () => {
+        const { model } = interruptedGrilling([1, 2])
+        const research = createResearch({ model, root })
+        const interrupted = await send(research, 'What did the ECB decide on rates in July 2025?')
+
+        const events = await send(research, 'Go on')
+
+        expect(interrupted.at(-1)).toEqual({
+          type: 'step',
+          step: 'failed',
+          reason: expect.stringMatching(/Grilling[\s\S]*overloaded/),
+        })
+        expect(events.at(-1)).toEqual({ type: 'step', step: 'awaiting_answer' })
+        expect(JSON.parse(await research.readArtifact('grilling_transcript.json'))).toEqual({
+          question: 'What did the ECB decide on rates in July 2025?',
+          turns: [{ question: 'Who is the audience?', recommendedAnswer: 'Retail investors' }],
+        })
+      })
+    })
   })
 
   describe('Artifacts', () => {
