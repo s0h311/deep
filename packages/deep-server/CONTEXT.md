@@ -10,6 +10,10 @@ Runs an automated Research: a fixed sequence of Steps that turns a user's questi
 The single end-to-end run from the user's question to a verdict. Only one Research exists at a time: it begins with the user's first message and ends with a reset. Until then there is no Research.
 _Avoid_: Session, job, project
 
+**Reset**:
+Ending the Research by deleting every Artifact, leaving no Research. The only way to start over once a Research is Failed or Completed.
+_Avoid_: New research, clear
+
 **Step**:
 One of the fixed, sequential stages of a Research: Grilling, Source Catalogue, Retrieval, Draft, Review. Each Step is performed by its own agent.
 _Avoid_: Phase, stage
