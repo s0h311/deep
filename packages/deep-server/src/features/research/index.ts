@@ -46,7 +46,20 @@ export type Research = {
   readArtifact(name: string): Promise<string>
   /** Aborts any running Step, then deletes every Artifact, so the next message starts a new Research. */
   reset(): Promise<void>
+  /** Where the Research stands: derived from its Artifacts, plus whether a send is running and why the last one was interrupted. */
+  state(): Promise<ResearchState>
 }
+
+export type ResearchState =
+  | { status: 'none' }
+  | ({ status: 'running' } & ActiveStep)
+  | { status: 'awaiting_answer' }
+  | ({ status: 'interrupted'; reason?: string } & ActiveStep)
+  | { status: 'failed'; reason: string }
+  | { status: 'completed' }
+
+/** A Step as a send announces it: Draft and Review with their Round. */
+type ActiveStep = { step: 'grilling' | 'source_catalogue' | 'retrieval' } | { step: 'draft' | 'review'; round: number }
 
 type ResearchConfig = {
   model?: Model
@@ -530,6 +543,11 @@ export function createResearch({
     }
   }
 
+  /** The running send, with the Step it last announced. */
+  let running: { announced?: ActiveStep } | undefined
+  /** Why the latest send was Interrupted, if it was; lost on restart. */
+  let interruption: string | undefined
+
   /** The send or reset in progress, whose controller aborts its agent calls. */
   let current: { controller: AbortController; settled: Promise<void> } | undefined
 
@@ -554,9 +572,19 @@ export function createResearch({
         throw new ResearchConflict(STEP_RUNNING)
       }
 
+      const sending: { announced?: ActiveStep } = {}
+      running = sending
+      interruption = undefined
+
+      // Each Step the send announces is recorded before it goes out, so state() reports it from then on.
+      const announcing: Emit = async (event) => {
+        sending.announced = announced(event) ?? sending.announced
+        await emit(event)
+      }
+
       await exclusively(async (signal) => {
         try {
-          await advance(message, { emit, signal })
+          await advance(message, { emit: announcing, signal })
         } catch (error) {
           if (signal.aborted) {
             await emit({ type: 'step', step: 'failed', reason: RESET })
@@ -568,7 +596,10 @@ export function createResearch({
             throw error
           }
 
+          interruption = error.message
           await emit({ type: 'step', step: 'failed', reason: error.message })
+        } finally {
+          running = undefined
         }
       })
     },
@@ -584,6 +615,45 @@ export function createResearch({
       })
     },
 
+    async state() {
+      if (running?.announced) {
+        return { status: 'running', ...running.announced }
+      }
+
+      const next = await nextStep()
+      const reason = interruption === undefined ? {} : { reason: interruption }
+
+      switch (next.step) {
+        case 'grilling': {
+          const transcript = await readTranscript()
+
+          if (transcript === undefined) {
+            return { status: 'none' }
+          }
+
+          const last = transcript.turns.at(-1)
+
+          // Only an unanswered question awaits an answer; otherwise Grilling was Interrupted.
+          return last && last.answer === undefined
+            ? { status: 'awaiting_answer' }
+            : { status: 'interrupted', step: 'grilling', ...reason }
+        }
+        case 'source_catalogue':
+        case 'retrieval':
+          return { status: 'interrupted', step: next.step, ...reason }
+        case 'draft':
+        case 'review':
+          return { status: 'interrupted', step: next.step, round: next.round, ...reason }
+        case 'failed':
+          return { status: 'failed', reason: next.reason }
+        case 'completed':
+          // A passing Round whose Report isn't published yet is Interrupted after its Review; the next send publishes it.
+          return next.published
+            ? { status: 'completed' }
+            : { status: 'interrupted', step: 'review', round: next.round, ...reason }
+      }
+    },
+
     async listArtifacts() {
       return (await artifactNames()).toSorted()
     },
@@ -595,6 +665,25 @@ export function createResearch({
 
       return await read(name)
     },
+  }
+}
+
+/** The Step the event announces, if it announces one that runs. */
+function announced(event: ResearchEvent): ActiveStep | undefined {
+  if (event.type !== 'step') {
+    return undefined
+  }
+
+  switch (event.step) {
+    case 'grilling':
+    case 'source_catalogue':
+    case 'retrieval':
+      return { step: event.step }
+    case 'draft':
+    case 'review':
+      return { step: event.step, round: event.round }
+    default:
+      return undefined
   }
 }
 

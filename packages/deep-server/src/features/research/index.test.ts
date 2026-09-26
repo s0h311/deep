@@ -905,4 +905,97 @@ describe('Research', () => {
       expect(await research.listArtifacts()).toEqual(['grilling_transcript.json'])
     })
   })
+
+  describe('State', () => {
+    const conclusion = structuredResponse({
+      done: true,
+      topic: 'ECB rates',
+      protocol: {
+        scope: 'The ECB, 2025',
+        goal: 'Understand the latest rate decision',
+        audience: 'Pension fund trustees',
+        openAssumptions: [],
+      },
+    })
+
+    test('before the first message there is no Research', async () => {
+      expect(await createResearch({ root }).state()).toEqual({ status: 'none' })
+    })
+
+    test('after a Grilling question the Research is Awaiting Answer', async () => {
+      const model = scriptedChatModel(() =>
+        structuredResponse({ question: 'Who is the audience?', recommendedAnswer: 'Retail investors' }),
+      )
+      const research = createResearch({ model, root })
+
+      await send(research, 'How do central banks set interest rates?')
+
+      expect(await research.state()).toEqual({ status: 'awaiting_answer' })
+    })
+
+    test('while a send is in flight the Research is Running, with the Step and Round it last announced', async () => {
+      const research = createResearch({ model: researchModel(() => conclusion), root })
+      const states: unknown[] = []
+
+      await research.send('What did the ECB decide on rates in July 2025?', async (event) => {
+        if (event.type === 'step' && (event.step === 'source_catalogue' || event.step === 'review')) {
+          states.push(await research.state())
+        }
+      })
+
+      expect(states).toEqual([
+        { status: 'running', step: 'source_catalogue' },
+        { status: 'running', step: 'review', round: 1 },
+      ])
+    })
+
+    test('after a Step fails every attempt the Research is Interrupted at that Step, with the reason', async () => {
+      const research = createResearch({ model: researchModel(() => conclusion, { draft: flaky(2, ecbDraft) }), root })
+
+      await send(research, 'What did the ECB decide on rates in July 2025?')
+
+      expect(await research.state()).toEqual({
+        status: 'interrupted',
+        step: 'draft',
+        round: 1,
+        reason: expect.stringMatching(/Draft[\s\S]*overloaded/),
+      })
+    })
+
+    test('after a restart a Research with unfinished Artifacts is Interrupted at its next Step, with no reason', async () => {
+      const model = researchModel(() => conclusion, { draft: flaky(2, ecbDraft) })
+      await send(createResearch({ model, root }), 'What did the ECB decide on rates in July 2025?')
+
+      expect(await createResearch({ model, root }).state()).toEqual({ status: 'interrupted', step: 'draft', round: 1 })
+    })
+
+    test.each([
+      { cause: 'no Primary Sources', options: { sources: [] }, reason: /Primary Source/ },
+      { cause: 'no Findings', options: { findings: [] }, reason: /no Findings/ },
+      { cause: 'every Round failing Review', options: { review: () => failingReview }, reason: /Review/ },
+    ])('after $cause the Research is Failed, with the reason', async ({ options, reason }) => {
+      const research = createResearch({ model: researchModel(() => conclusion, options), root })
+
+      await send(research, 'What did the ECB decide on rates in July 2025?')
+
+      expect(await research.state()).toEqual({ status: 'failed', reason: expect.stringMatching(reason) })
+    })
+
+    test('once the Report is published the Research is Completed', async () => {
+      const research = createResearch({ model: researchModel(() => conclusion), root })
+
+      await send(research, 'What did the ECB decide on rates in July 2025?')
+
+      expect(await research.state()).toEqual({ status: 'completed' })
+    })
+
+    test('after a reset there is no Research', async () => {
+      const research = createResearch({ model: researchModel(() => conclusion, { draft: flaky(2, ecbDraft) }), root })
+      await send(research, 'What did the ECB decide on rates in July 2025?')
+
+      await research.reset()
+
+      expect(await research.state()).toEqual({ status: 'none' })
+    })
+  })
 })
