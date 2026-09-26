@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { HumanMessage, SystemMessage } from '@langchain/core/messages'
 import { copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { domainToASCII } from 'node:url'
 import { runAgent } from '../../infrastructure/agent/client.ts'
 import { chatModel } from '../../infrastructure/agent/model.ts'
 import { webSearchTool, webToolsFor } from '../../infrastructure/agent/providers/anthropic.ts'
@@ -39,7 +40,7 @@ type StepContext = { emit: Emit; signal: AbortSignal }
 export type Research = {
   /** Advances the Research according to its state, emitting progress until a terminal step value. */
   send(message: string, emit: Emit): Promise<void>
-  /** The names of the Artifacts and working files produced so far, sorted. */
+  /** The names of the Artifacts produced so far, including any Grilling Transcript, sorted. */
   listArtifacts(): Promise<string[]>
   /** The content of the Artifact with the given name. */
   readArtifact(name: string): Promise<string>
@@ -70,7 +71,7 @@ type Round = { topic: string; round: number }
 
 type GrillingTurn = { question: string; recommendedAnswer: string; answer?: string }
 
-/** Working file of the Grilling Step, kept until the Grilling Protocol exists. */
+/** The Grilling Step's interim Artifact, deleted once the Grilling Protocol is written. */
 type GrillingTranscript = { question: string; turns: GrillingTurn[] }
 
 const GRILLING_TRANSCRIPT = 'grilling_transcript.json'
@@ -83,6 +84,11 @@ const FIRST_FINDING = /^## F1$/m
 const MAX_TOPIC_SLUG_LENGTH = 50
 /** For a Topic with no ASCII letters or digits to keep. */
 const FALLBACK_TOPIC_SLUG = 'research'
+const MAX_HOSTNAME_LENGTH = 253
+/** A DNS label: 1–63 letters, digits or hyphens, not starting or ending with a hyphen. */
+const HOSTNAME_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
+/** A top-level label: letters only, or punycode; this rules out IP addresses. */
+const TOP_LEVEL_LABEL = /^(?:[a-z]{2,63}|xn--[a-z0-9-]+)$/
 
 const grillingProtocol = z.object({
   scope: z.string(),
@@ -237,6 +243,11 @@ export function createResearch({
   model = chatModel(fakeScript),
   root = researchDirectory(),
 }: ResearchConfig = {}): Research {
+  /** The content of the Artifact with the given name. */
+  async function read(name: string): Promise<string> {
+    return await readFile(join(root, name), 'utf8')
+  }
+
   /** Runs one Grilling turn, returning the Topic once Grilling concludes. */
   async function grill(transcript: GrillingTranscript, context: StepContext): Promise<string | undefined> {
     await context.emit({ type: 'step', step: 'grilling' })
@@ -262,10 +273,7 @@ export function createResearch({
     if ('done' in outcome) {
       const topic = slugify(outcome.topic)
 
-      await writeFile(
-        join(root, `${topic}${GRILLING_PROTOCOL_SUFFIX}`),
-        renderProtocol(transcript.question, outcome.protocol),
-      )
+      await writeFile(join(root, protocolName(topic)), renderProtocol(transcript.question, outcome.protocol))
       await rm(join(root, GRILLING_TRANSCRIPT), { force: true })
 
       return topic
@@ -285,7 +293,7 @@ export function createResearch({
   async function catalogueSources(topic: string, context: StepContext): Promise<boolean> {
     await context.emit({ type: 'step', step: 'source_catalogue' })
 
-    const message = await readFile(join(root, `${topic}${GRILLING_PROTOCOL_SUFFIX}`), 'utf8')
+    const message = await read(protocolName(topic))
     const { sources } = await retried({ step: 'Source Catalogue', signal: context.signal }, () =>
       runAgent({
         model,
@@ -301,7 +309,7 @@ export function createResearch({
     const hosts = normaliseHosts(sources)
 
     // An empty Source Catalogue is kept: it records that the Research failed.
-    await writeFile(join(root, `${topic}${SOURCE_CATALOGUE_SUFFIX}`), JSON.stringify({ sources: hosts }, null, 2))
+    await writeFile(join(root, catalogueName(topic)), JSON.stringify({ sources: hosts }, null, 2))
 
     if (!hosts.length) {
       await context.emit({ type: 'step', step: 'failed', reason: NO_PRIMARY_SOURCES })
@@ -315,10 +323,7 @@ export function createResearch({
     await context.emit({ type: 'step', step: 'retrieval' })
 
     const { sources } = await readSourceCatalogue(topic)
-    const message = [
-      await readFile(join(root, `${topic}${GRILLING_PROTOCOL_SUFFIX}`), 'utf8'),
-      renderSourceCatalogue(sources),
-    ].join('\n\n')
+    const message = [await read(protocolName(topic)), renderSourceCatalogue(sources)].join('\n\n')
     const { findings } = await retried({ step: 'Retrieval', signal: context.signal }, () =>
       runAgent({
         model,
@@ -334,7 +339,7 @@ export function createResearch({
     const valid = findings.filter(({ url }) => isOnSource(url, sources))
 
     // A Findings file with no entries is kept: it records that the Research failed.
-    await writeFile(join(root, `${topic}${FINDINGS_SUFFIX}`), renderFindings(valid))
+    await writeFile(join(root, findingsName(topic)), renderFindings(valid))
 
     if (!valid.length) {
       await context.emit({ type: 'step', step: 'failed', reason: NO_FINDINGS })
@@ -347,20 +352,11 @@ export function createResearch({
   async function writeDraft({ topic, round }: Round, context: StepContext): Promise<void> {
     await context.emit({ type: 'step', step: 'draft', round })
 
-    const findings = await readFile(join(root, `${topic}${FINDINGS_SUFFIX}`), 'utf8')
+    const findings = await read(findingsName(topic))
     // From Round 2, the agent revises the previous Draft against its failing Review.
     const previous =
-      round > 1
-        ? [
-            await readFile(join(root, draftName(topic, round - 1)), 'utf8'),
-            await readFile(join(root, reviewName(topic, round - 1)), 'utf8'),
-          ]
-        : []
-    const message = [
-      await readFile(join(root, `${topic}${GRILLING_PROTOCOL_SUFFIX}`), 'utf8'),
-      findings,
-      ...previous,
-    ].join('\n\n')
+      round > 1 ? [await read(draftName(topic, round - 1)), await read(reviewName(topic, round - 1))] : []
+    const message = [await read(protocolName(topic)), findings, ...previous].join('\n\n')
     const response = await retried({ step: 'Draft', signal: context.signal }, () =>
       runAgent({
         model,
@@ -379,10 +375,7 @@ export function createResearch({
   async function reviewDraft({ topic, round }: Round, context: StepContext): Promise<Verdict> {
     await context.emit({ type: 'step', step: 'review', round })
 
-    const message = [
-      await readFile(join(root, draftName(topic, round)), 'utf8'),
-      await readFile(join(root, `${topic}${FINDINGS_SUFFIX}`), 'utf8'),
-    ].join('\n\n')
+    const message = [await read(draftName(topic, round)), await read(findingsName(topic))].join('\n\n')
     const response = await retried({ step: 'Review', signal: context.signal }, () =>
       runAgent({
         model,
@@ -400,43 +393,29 @@ export function createResearch({
   }
 
   async function readVerdict({ topic, round }: Round): Promise<Verdict> {
-    const verdict = (await readFile(join(root, reviewName(topic, round)), 'utf8')).match(/^---\nverdict: (\w+)\n/)?.[1]
+    const verdict = (await read(reviewName(topic, round))).match(/^---\nverdict: (\w+)\n/)?.[1]
 
     return review.shape.verdict.parse(verdict)
   }
 
   async function hasFindings(topic: string): Promise<boolean> {
-    return FIRST_FINDING.test(await readFile(join(root, `${topic}${FINDINGS_SUFFIX}`), 'utf8'))
+    return FIRST_FINDING.test(await read(findingsName(topic)))
   }
 
   async function readSourceCatalogue(topic: string): Promise<SourceCatalogue> {
-    return sourceCatalogue.parse(JSON.parse(await readFile(join(root, `${topic}${SOURCE_CATALOGUE_SUFFIX}`), 'utf8')))
+    return sourceCatalogue.parse(JSON.parse(await read(catalogueName(topic))))
   }
 
-  /** The names of all Artifacts and working files. */
+  /** The names of all Artifacts, including any Grilling Transcript. */
   async function artifactNames(): Promise<string[]> {
-    try {
-      return await readdir(root)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return []
-      }
-
-      throw error
-    }
+    return (await ifExists(readdir(root))) ?? []
   }
 
   /** The Grilling transcript, if Grilling has started. */
   async function readTranscript(): Promise<GrillingTranscript | undefined> {
-    try {
-      return JSON.parse(await readFile(join(root, GRILLING_TRANSCRIPT), 'utf8'))
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return undefined
-      }
+    const transcript = await ifExists(read(GRILLING_TRANSCRIPT))
 
-      throw error
-    }
+    return transcript === undefined ? undefined : JSON.parse(transcript)
   }
 
   async function saveTranscript(transcript: GrillingTranscript): Promise<void> {
@@ -466,7 +445,7 @@ export function createResearch({
       }
     }
 
-    if (!names.includes(`${topic}${SOURCE_CATALOGUE_SUFFIX}`)) {
+    if (!names.includes(catalogueName(topic))) {
       if (!(await catalogueSources(topic, context))) {
         return
       }
@@ -475,7 +454,7 @@ export function createResearch({
       throw new ResearchConflict(RESET_FIRST)
     }
 
-    if (!names.includes(`${topic}${FINDINGS_SUFFIX}`)) {
+    if (!names.includes(findingsName(topic))) {
       if (!(await retrieve(topic, context))) {
         return
       }
@@ -484,7 +463,7 @@ export function createResearch({
       throw new ResearchConflict(RESET_FIRST)
     }
 
-    if (names.includes(`${topic}${REPORT_SUFFIX}`)) {
+    if (names.includes(reportName(topic))) {
       throw new ResearchConflict(RESET_FIRST)
     }
 
@@ -515,7 +494,7 @@ export function createResearch({
       verdict = await reviewDraft({ topic, round }, context)
     }
 
-    await copyFile(join(root, draftName(topic, round)), join(root, `${topic}${REPORT_SUFFIX}`))
+    await copyFile(join(root, draftName(topic, round)), join(root, reportName(topic)))
     await context.emit({ type: 'step', step: 'completed' })
   }
 
@@ -582,7 +561,7 @@ export function createResearch({
         throw new ArtifactNotFound(`No Artifact named ${name}.`)
       }
 
-      return await readFile(join(root, name), 'utf8')
+      return await read(name)
     },
   }
 }
@@ -612,6 +591,35 @@ async function retried<Response>(
       }
     }
   }
+}
+
+/** The promise's value, or undefined if it rejects because the file or directory doesn't exist. */
+async function ifExists<T>(promise: Promise<T>): Promise<T | undefined> {
+  try {
+    return await promise
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return undefined
+    }
+
+    throw error
+  }
+}
+
+function protocolName(topic: string): string {
+  return `${topic}${GRILLING_PROTOCOL_SUFFIX}`
+}
+
+function catalogueName(topic: string): string {
+  return `${topic}${SOURCE_CATALOGUE_SUFFIX}`
+}
+
+function findingsName(topic: string): string {
+  return `${topic}${FINDINGS_SUFFIX}`
+}
+
+function reportName(topic: string): string {
+  return `${topic}${REPORT_SUFFIX}`
 }
 
 function draftName(topic: string, round: number): string {
@@ -650,8 +658,6 @@ function parseFindingUrls(findings: string): Map<string, string> {
 
 /** The Draft with a Sources section listing only the Findings it cites, grouped by host. */
 function renderDraft({ summary, keyFacts, gaps, followUpQuestions }: Draft, findingUrls: Map<string, string>): string {
-  const list = (items: string[]) => (items.length ? items.map((item) => `- ${item}`).join('\n') : 'None.')
-
   return `# Report
 
 ## Summary
@@ -660,15 +666,15 @@ ${summary}
 
 ## Key facts
 
-${list(keyFacts)}
+${bulletList(keyFacts)}
 
 ## Gaps
 
-${list(gaps)}
+${bulletList(gaps)}
 
 ## Follow-up questions
 
-${list(followUpQuestions)}
+${bulletList(followUpQuestions)}
 
 ## Sources
 
@@ -695,10 +701,6 @@ function renderSources(text: string, findingUrls: Map<string, string>): string {
 }
 
 function renderReview({ verdict, offendingClaims }: Review, round: number): string {
-  const offending = offendingClaims.length
-    ? offendingClaims.map(({ claim, reason }) => `- ${claim}\n  - ${reason}`).join('\n')
-    : 'None.'
-
   return `---
 verdict: ${verdict}
 ---
@@ -707,8 +709,13 @@ verdict: ${verdict}
 
 ## Offending Claims
 
-${offending}
+${bulletList(offendingClaims.map(({ claim, reason }) => `${claim}\n  - ${reason}`))}
 `
+}
+
+/** The items as a Markdown list, or `None.` if there are none. */
+function bulletList(items: string[]): string {
+  return items.length ? items.map((item) => `- ${item}`).join('\n') : 'None.'
 }
 
 function renderTranscript({ question, turns }: GrillingTranscript): string {
@@ -725,10 +732,6 @@ function renderQuestion({ question, recommendedAnswer }: GrillingTurn, number: n
 }
 
 function renderProtocol(question: string, { scope, goal, audience, openAssumptions }: GrillingProtocol): string {
-  const assumptions = openAssumptions.length
-    ? openAssumptions.map((assumption) => `- ${assumption}`).join('\n')
-    : 'None.'
-
   return `# Grilling Protocol
 
 ## Question
@@ -749,7 +752,7 @@ ${audience}
 
 ## Open assumptions
 
-${assumptions}
+${bulletList(openAssumptions)}
 `
 }
 
@@ -759,7 +762,7 @@ function isOnSource(url: string, sources: string[]): boolean {
     return false
   }
 
-  const { hostname } = new URL(url)
+  const hostname = new URL(url).hostname.replace(/\.$/, '')
 
   return sources.some((source) => hostname === source || hostname.endsWith(`.${source}`))
 }
@@ -782,15 +785,31 @@ function renderFindings(findings: Finding[]): string {
 }
 
 /**
- * The agent's Sources as bare, lowercase, unique hosts. A leading `*.` is dropped, as a host covers its subdomains
- * anyway; entries with a scheme, path, port, other wildcard or whitespace are rejected.
+ * The agent's Sources as bare, lowercase, unique ASCII hosts, so they match URL hostnames. A leading `*.` is dropped,
+ * as a host covers its subdomains anyway, as is a trailing `.`; an internationalised host is punycoded. Entries
+ * with a scheme, path, port, other wildcard or whitespace are rejected, as is anything that isn't a public hostname:
+ * empty or malformed labels, a single label such as `localhost`, or an IP address.
  */
 function normaliseHosts(sources: string[]): string[] {
   const hosts = sources
-    .map((source) => source.trim().toLowerCase().replace(/^\*\./, ''))
+    .map((source) => source.trim().toLowerCase().replace(/^\*\./, '').replace(/\.$/, ''))
     .filter((host) => /^[^\s/:*?#@]+$/.test(host))
+    .map((host) => domainToASCII(host))
+    .filter(isHostname)
 
   return [...new Set(hosts)]
+}
+
+/** Whether the ASCII host is a hostname with at least two labels and a top-level label that isn't numeric. */
+function isHostname(host: string): boolean {
+  const labels = host.split('.')
+
+  return (
+    host.length <= MAX_HOSTNAME_LENGTH &&
+    labels.length > 1 &&
+    labels.every((label) => HOSTNAME_LABEL.test(label)) &&
+    TOP_LEVEL_LABEL.test(labels.at(-1) ?? '')
+  )
 }
 
 /** The Topic as a snake_case `[a-z0-9_]` file name prefix: diacritics dropped, other characters collapsed to `_`. */

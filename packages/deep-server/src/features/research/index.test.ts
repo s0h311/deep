@@ -314,6 +314,12 @@ describe('Research', () => {
       expect(written).toEqual({ sources: ['ecb.europa.eu', 'federalreserve.gov'] })
     })
 
+    test('hosts are normalised: a trailing dot is stripped and an internationalised host is punycoded', async () => {
+      const { catalogue: written } = await catalogue(['ecb.europa.eu.', 'ecb.europa.eu', 'münchen.de'])
+
+      expect(written).toEqual({ sources: ['ecb.europa.eu', 'xn--mnchen-3ya.de'] })
+    })
+
     test.each([
       { kind: 'a scheme', entry: 'https://bis.org' },
       { kind: 'a path', entry: 'bis.org/statistics' },
@@ -322,6 +328,12 @@ describe('Research', () => {
       { kind: 'a port', entry: 'bis.org:443' },
       { kind: 'whitespace', entry: 'bis org' },
       { kind: 'nothing', entry: '' },
+      { kind: 'only dots', entry: '..' },
+      { kind: 'only a hyphen', entry: '-' },
+      { kind: 'a single label', entry: 'localhost' },
+      { kind: 'an empty label', entry: 'a..b.org' },
+      { kind: 'a label starting with a hyphen', entry: '-bad.org' },
+      { kind: 'an IP address', entry: '1.2.3.4' },
     ])('an entry with $kind is rejected', async ({ entry }) => {
       const { catalogue: written } = await catalogue(['ecb.europa.eu', entry])
 

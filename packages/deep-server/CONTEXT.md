@@ -29,17 +29,21 @@ A Research whose Draft passed Review and was published as the Report.
 A Research that ended without a Report: the Source Catalogue was empty, Retrieval produced no Findings, or all Rounds failed Review. Only a reset starts over.
 
 **Interrupted**:
-A Research stopped mid-Step (agent error, restart). Unlike Failed, it resumes from its Artifacts.
+A Research stopped mid-Step (agent error, restart). Unlike Failed, it resumes from its Artifacts. On the stream, both end with the `failed` step; its reason tells them apart, and only an Interrupted Research resumes on the next message. A reset during a running Step ends that stream with `failed` too.
 _Avoid_: Paused, crashed
 
 ### Artifacts
+
+**Grilling Transcript**:
+The Grilling Step's interim Artifact: the question and the interview so far. Deleted once the GP is written.
+_Avoid_: Working file, chat history
 
 **Grilling Protocol** (GP):
 The record of the Grilling Step: the agreed scope, goal and audience of the Research.
 _Avoid_: Brief, requirements
 
 **Topic**:
-The short name the Grilling Step gives the Research; every Artifact is named after it.
+The short name the Grilling Step gives the Research; every Artifact from the GP on is named after it.
 _Avoid_: Title, subject
 
 **Source Catalogue** (SC):

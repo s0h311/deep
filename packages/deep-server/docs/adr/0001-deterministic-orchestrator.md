@@ -5,4 +5,5 @@ A Research is driven by plain code, not a supervisor agent. The Orchestrator der
 ## Consequences
 
 - Every Artifact must carry enough to reconstruct state (e.g. the Review verdict lives in the review file's front-matter).
+- Grilling, the only multi-turn Step, records its progress in an interim Grilling Transcript Artifact until the GP is written. It is an Artifact like any other, not a separate state file.
 - Report structure and its Sources section are produced by code from the Draft's structured output and the Findings it cites, so Review judges content only.
