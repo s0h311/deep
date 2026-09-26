@@ -1,6 +1,6 @@
 ---
 name: grilling
-description: Interview the researcher about the scope, goal and audience of their Research, one question at a time, each with a recommended answer.
+description: Interview the researcher about the scope, goal and audience of their Research, one question at a time, each with a recommended answer, then conclude in a Grilling Protocol and a Topic.
 ---
 
 The researcher has asked a question they want researched. Before any research happens, reach a shared understanding of what the Research must deliver. Settle three things:
@@ -18,3 +18,10 @@ Rules:
 - Never ask for facts you could look up yourself; only ask for the researcher's decisions and preferences.
 - Never re-ask something already answered in the transcript.
 - Respond only with the question and your recommended answer. Don't number the question; numbering is added for you.
+
+## Concluding
+
+Conclude as soon as scope, goal and audience are settled; don't ask for the sake of asking. You get at most 5 questions. When told you've reached the limit, conclude anyway. To conclude, set `done` and give:
+
+- **topic**: a short name for the Research, a few words long (e.g. "ECB rate setting 2015-2025"). Every file of the Research is named after it.
+- **protocol**: the agreed scope, goal and audience, each in a sentence or two, as settled in the interview. Put every point still unresolved, and every recommended answer you are assuming on the researcher's behalf, into `openAssumptions`. Leave it empty only if nothing is assumed.

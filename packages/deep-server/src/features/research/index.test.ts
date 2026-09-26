@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
-import { HumanMessage } from '@langchain/core/messages'
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { type BaseMessage, HumanMessage } from '@langchain/core/messages'
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createResearch, type ResearchEvent } from './index.ts'
 import { scriptedChatModel, structuredResponse } from '../../infrastructure/agent/scripted-chat-model.ts'
+import { defined } from '../../infrastructure/utils/utils.ts'
 
 describe('Research', () => {
   let root: string
@@ -65,5 +66,141 @@ describe('Research', () => {
       { type: 'text', text: expect.stringMatching(/Q2[\s\S]*Which central banks\?[\s\S]*The ECB and the Fed/) },
       { type: 'step', step: 'awaiting_answer' },
     ])
+  })
+
+  describe('when Grilling concludes', () => {
+    const protocol = {
+      scope: 'The ECB and the Fed, 2015 to 2025',
+      goal: 'Understand how policy rates are decided',
+      audience: 'Pension fund trustees',
+      openAssumptions: [],
+    }
+
+    function answered(messages: BaseMessage[], answer: string): boolean {
+      return messages.some((message) => HumanMessage.isInstance(message) && message.text.includes(answer))
+    }
+
+    test('a multi-turn Grilling ends in a Grilling Protocol named after the Topic', async () => {
+      const model = scriptedChatModel((messages) => {
+        if (answered(messages, 'The ECB and the Fed')) {
+          return structuredResponse({ done: true, topic: 'Central bank rate setting', protocol })
+        }
+
+        if (answered(messages, 'Pension fund trustees')) {
+          return structuredResponse({ question: 'Which central banks?', recommendedAnswer: 'The ECB and the Fed' })
+        }
+
+        return structuredResponse({ question: 'Who is the audience?', recommendedAnswer: 'Retail investors' })
+      })
+      const research = createResearch({ model, root })
+
+      const events = [
+        await send(research, 'How do central banks set interest rates?'),
+        await send(research, 'Pension fund trustees'),
+        await send(research, 'The ECB and the Fed'),
+      ]
+
+      expect(events.map((turn) => turn.at(-1))).toEqual([
+        { type: 'step', step: 'awaiting_answer' },
+        { type: 'step', step: 'awaiting_answer' },
+        { type: 'step', step: 'grilling' },
+      ])
+      expect(await readdir(root)).toEqual(['central_bank_rate_setting_grilling_protocol.md'])
+      expect(await readFile(join(root, 'central_bank_rate_setting_grilling_protocol.md'), 'utf8')).toMatch(
+        /How do central banks set interest rates\?[\s\S]*The ECB and the Fed, 2015 to 2025[\s\S]*Understand how policy rates are decided[\s\S]*Pension fund trustees/,
+      )
+    })
+
+    describe('after 5 answered questions', () => {
+      const answers = ['Retail investors', 'The ECB', '2020 to 2025', 'Policy rates only', 'A one-page summary']
+      const question = structuredResponse({ question: 'What else?', recommendedAnswer: 'Nothing' })
+
+      async function grillFiveTurns(research: ReturnType<typeof createResearch>): Promise<ResearchEvent[][]> {
+        const events = [await send(research, 'How do central banks set interest rates?')]
+
+        for (const answer of answers.slice(0, -1)) {
+          events.push(await send(research, answer))
+        }
+
+        return events
+      }
+
+      test('Grilling is told to conclude, recording unresolved points as open assumptions in the GP', async () => {
+        const model = scriptedChatModel((messages) =>
+          messages.some((message) => HumanMessage.isInstance(message) && /conclude/i.test(message.text))
+            ? structuredResponse({
+                done: true,
+                topic: 'Central bank rate setting',
+                protocol: { ...protocol, openAssumptions: ['Only the ECB is in scope'] },
+              })
+            : question,
+        )
+        const research = createResearch({ model, root })
+
+        const questions = await grillFiveTurns(research)
+        await send(research, defined(answers.at(-1)))
+
+        expect(questions.map((turn) => turn.at(-1))).toEqual(
+          answers.map(() => ({ type: 'step', step: 'awaiting_answer' })),
+        )
+        expect(await readFile(join(root, 'central_bank_rate_setting_grilling_protocol.md'), 'utf8')).toMatch(
+          /Open assumptions[\s\S]*Only the ECB is in scope/,
+        )
+      })
+
+      test('no 6th question is asked, even by a model that keeps asking', async () => {
+        const model = scriptedChatModel(() => question)
+        const research = createResearch({ model, root })
+        await grillFiveTurns(research)
+
+        const events: ResearchEvent[] = []
+        await research
+          .send(defined(answers.at(-1)), (event) => {
+            events.push(event)
+          })
+          .catch(() => {})
+
+        expect(events).not.toContainEqual({ type: 'step', step: 'awaiting_answer' })
+      })
+    })
+
+    test.each([
+      { kind: 'spaces and case', topic: 'Central Bank Rate Setting', slug: 'central_bank_rate_setting' },
+      {
+        kind: 'punctuation',
+        topic: '  ECB vs. Fed: rate-setting (2015–2025)!  ',
+        slug: 'ecb_vs_fed_rate_setting_2015_2025',
+      },
+      {
+        kind: 'non-ASCII letters',
+        topic: 'Zürich Mietpreisbremse, São Paulo',
+        slug: 'zurich_mietpreisbremse_sao_paulo',
+      },
+      { kind: 'non-ASCII only', topic: '日本の金利', slug: 'research' },
+      {
+        kind: 'length',
+        topic: 'An extremely long Topic about the monetary policy of the European Central Bank',
+        slug: 'an_extremely_long_topic_about_the_monetary_policy',
+      },
+    ])('the Topic is slugified into a safe snake_case file name: $kind', async ({ topic, slug }) => {
+      const model = scriptedChatModel(() => structuredResponse({ done: true, topic, protocol }))
+
+      await send(createResearch({ model, root }), 'How do central banks set interest rates?')
+
+      expect(await readdir(root)).toEqual([`${slug}_grilling_protocol.md`])
+    })
+
+    test('the Research stops once the Grilling Protocol is written', async () => {
+      const model = scriptedChatModel(() =>
+        structuredResponse({ done: true, topic: 'Central bank rate setting', protocol }),
+      )
+      const research = createResearch({ model, root })
+      await send(research, 'How do central banks set interest rates?')
+
+      const events = await send(research, 'How do tides work?')
+
+      expect(events).toEqual([])
+      expect(await readdir(root)).toEqual(['central_bank_rate_setting_grilling_protocol.md'])
+    })
   })
 })
