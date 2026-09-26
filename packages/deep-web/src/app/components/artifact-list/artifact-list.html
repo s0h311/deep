@@ -1,12 +1,9 @@
-<h2 class="text-sm font-medium text-muted">Artifacts</h2>
-<ul class="mt-2 space-y-1">
+<ul class="space-y-1">
   @for (artifact of artifacts(); track artifact.name) {
   <li>
     <button
       type="button"
-      class="flex w-full items-center justify-between gap-2 rounded-md px-3 py-1.5 text-left text-sm hover:bg-surface"
-      [class.bg-accent-soft]="artifact.name === selected()"
-      [attr.aria-current]="artifact.name === selected() ? 'true' : null"
+      class="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-surface"
       (click)="opened.emit(artifact.name)"
     >
       <span>{{ artifact.label }}</span>
@@ -19,5 +16,7 @@
       }
     </button>
   </li>
+  } @empty {
+  <li class="px-3 py-2 text-sm text-muted">No Artifacts yet.</li>
   }
 </ul>

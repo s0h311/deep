@@ -1,47 +1,40 @@
 @let status = research.state().status;
-<div class="flex h-dvh flex-col bg-surface">
-  <header class="grid h-14 shrink-0 grid-cols-[auto_1fr_auto] items-center gap-4 px-4 sm:px-6">
-    <span class="flex items-center gap-2 font-semibold tracking-tight">
-      <span class="size-2.5 rounded-full bg-accent"></span>deep
-    </span>
-    @if (status !== 'none') {
-    <app-stepper
-      class="flex justify-center"
-      [state]="research.state()"
-    />
-    <button
-      type="button"
-      class="rounded-lg px-3 py-1.5 text-sm font-medium text-muted hover:bg-bg hover:text-fg"
-      (click)="confirmingReset.set(true)"
-    >
-      New research
-    </button>
-    }
-  </header>
+<div class="flex h-dvh bg-surface">
+  <div class="flex min-w-0 flex-1 flex-col">
+    <header class="grid h-14 shrink-0 grid-cols-[auto_1fr_auto] items-center gap-4 px-4 sm:px-6">
+      <span class="flex items-center gap-2 font-semibold tracking-tight">
+        <span class="size-2.5 rounded-full bg-accent"></span>deep
+      </span>
+      @if (status !== 'none') {
+      <app-stepper
+        class="flex justify-center"
+        [state]="research.state()"
+      />
+      <div class="flex items-center gap-2">
+        <button
+          type="button"
+          class="rounded-lg px-3 py-1.5 text-sm font-medium text-muted hover:bg-bg hover:text-fg"
+          (click)="confirmingReset.set(true)"
+        >
+          New research
+        </button>
+        <button
+          type="button"
+          class="flex items-center gap-2 rounded-lg border border-line bg-bg px-3 py-1.5 text-sm font-medium hover:border-accent/50"
+          [attr.aria-expanded]="drawerOpen()"
+          (click)="drawerOpen.set(!drawerOpen())"
+        >
+          Artifacts
+          <span class="rounded-md bg-surface px-1.5 text-xs text-muted">{{ research.artifactList().length }}</span>
+        </button>
+      </div>
+      }
+    </header>
 
-  <div class="flex min-h-0 flex-1 flex-col overflow-y-auto lg:flex-row lg:overflow-hidden">
-    <main class="flex-1 lg:overflow-y-auto">
+    <main class="min-h-0 flex-1 overflow-y-auto">
       @if (status === 'none') {
       <div class="flex h-full min-h-64 items-center justify-center px-4">
         <h1 class="text-2xl font-semibold tracking-tight">What do you want to research?</h1>
-      </div>
-      } @else if (research.openedMarkdown(); as markdown) {
-      <div class="mx-auto w-full max-w-3xl px-4 py-6">
-        <button
-          type="button"
-          class="mb-4 rounded-lg px-2 py-1 text-sm text-muted hover:bg-bg hover:text-fg"
-          (click)="research.close()"
-        >
-          Back to the chat
-        </button>
-        <div class="rounded-2xl bg-bg p-6 shadow-sm">
-          <app-markdown-view
-            [markdown]="markdown"
-            [citations]="research.opened()?.kind === 'draft' || research.opened()?.kind === 'report'"
-            [finding]="research.opened()?.finding"
-            (citationFollowed)="research.openFinding($event)"
-          />
-        </div>
       </div>
       } @else {
       <div class="mx-auto flex w-full max-w-2xl flex-col gap-4 px-4 py-6">
@@ -74,61 +67,130 @@
       </div>
       }
     </main>
-    @if (status !== 'none') {
-    <!-- Temporary: the Artifacts and Sources drawer replaces this column. -->
-    <aside
-      class="space-y-6 border-t border-line bg-bg p-4 lg:w-72 lg:shrink-0 lg:overflow-y-auto lg:border-t-0 lg:border-l"
-    >
-      <app-artifact-list
-        [artifacts]="research.artifactList()"
-        [selected]="research.opened()?.name"
-        (opened)="research.open($event)"
-      />
-      <app-source-catalogue-panel [sources]="research.sources()" />
-    </aside>
+
+    @if (messageable() || status === 'completed' || status === 'failed') {
+    <footer class="shrink-0 px-4 pt-2 pb-5">
+      <div class="mx-auto w-full max-w-2xl">
+        @if (messageable()) {
+        <form
+          class="flex items-end gap-2 rounded-2xl bg-bg p-2 pl-4 shadow-md ring-1 ring-line"
+          (submit)="sendTyped($event)"
+        >
+          <textarea
+            name="message"
+            rows="1"
+            aria-label="Message"
+            class="field-sizing-content max-h-40 min-h-9 min-w-0 flex-1 resize-none bg-transparent py-1.5 text-sm outline-none placeholder:text-muted disabled:text-muted"
+            [placeholder]="placeholder()"
+            [value]="message()"
+            [disabled]="research.busy()"
+            (input)="message.set($any($event.target).value)"
+            (keydown)="keydown($event)"
+          ></textarea>
+          <button
+            type="submit"
+            class="rounded-xl bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-40"
+            [disabled]="research.busy()"
+          >
+            Send
+          </button>
+        </form>
+        } @else {
+        <div class="flex justify-center">
+          <button
+            type="button"
+            class="rounded-xl bg-bg px-4 py-2 text-sm font-medium shadow-sm ring-1 ring-line hover:ring-accent/50"
+            (click)="confirmingReset.set(true)"
+          >
+            New research
+          </button>
+        </div>
+        }
+      </div>
+    </footer>
     }
   </div>
 
-  @if (messageable() || status === 'completed' || status === 'failed') {
-  <footer class="shrink-0 px-4 pt-2 pb-5">
-    <div class="mx-auto w-full max-w-2xl">
-      @if (messageable()) {
-      <form
-        class="flex items-end gap-2 rounded-2xl bg-bg p-2 pl-4 shadow-md ring-1 ring-line"
-        (submit)="sendTyped($event)"
+  @if (drawerOpen() && status !== 'none') {
+  <!-- Docked beside the thread on wide screens, a full-screen overlay on narrow ones; wider while it reads an Artifact. -->
+  <aside
+    aria-label="Artifacts and Sources"
+    class="fixed inset-0 z-20 flex flex-col bg-bg lg:static lg:shrink-0 lg:border-l lg:border-line"
+    [class]="research.opened() ? 'lg:w-176' : 'lg:w-104'"
+  >
+    @if (research.opened(); as artifact) {
+    <header class="flex h-14 shrink-0 items-center gap-2 border-b border-line px-3">
+      <button
+        type="button"
+        class="rounded-lg px-2 py-1 text-muted hover:bg-surface hover:text-fg"
+        aria-label="All Artifacts"
+        (click)="research.close()"
       >
-        <textarea
-          name="message"
-          rows="1"
-          aria-label="Message"
-          class="field-sizing-content max-h-40 min-h-9 min-w-0 flex-1 resize-none bg-transparent py-1.5 text-sm outline-none placeholder:text-muted disabled:text-muted"
-          [placeholder]="placeholder()"
-          [value]="message()"
-          [disabled]="research.busy()"
-          (input)="message.set($any($event.target).value)"
-          (keydown)="keydown($event)"
-        ></textarea>
-        <button
-          type="submit"
-          class="rounded-xl bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-40"
-          [disabled]="research.busy()"
-        >
-          Send
-        </button>
-      </form>
-      } @else {
-      <div class="flex justify-center">
-        <button
-          type="button"
-          class="rounded-xl bg-bg px-4 py-2 text-sm font-medium shadow-sm ring-1 ring-line hover:ring-accent/50"
-          (click)="confirmingReset.set(true)"
-        >
-          New research
-        </button>
-      </div>
+        ←
+      </button>
+      <span class="font-medium">{{ artifact.label }}</span>
+      <button
+        type="button"
+        class="ml-auto rounded-lg px-2 py-1 text-muted hover:bg-surface hover:text-fg"
+        aria-label="Close"
+        (click)="closeDrawer()"
+      >
+        ✕
+      </button>
+    </header>
+    <div class="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+      @if (research.openedMarkdown(); as markdown) {
+      <app-markdown-view
+        [markdown]="markdown"
+        [citations]="artifact.kind === 'draft' || artifact.kind === 'report'"
+        [finding]="artifact.finding"
+        (citationFollowed)="research.openFinding($event)"
+      />
       }
     </div>
-  </footer>
+    } @else {
+    <header class="flex h-14 shrink-0 items-center justify-between border-b border-line px-3">
+      <div
+        role="tablist"
+        class="flex gap-1 rounded-lg bg-surface p-1"
+      >
+        @for (tab of tabs; track tab.key) {
+        <button
+          type="button"
+          role="tab"
+          class="rounded-md px-3 py-1 text-sm"
+          [class]="drawerTab() === tab.key ? 'bg-bg font-medium shadow-sm' : 'text-muted hover:text-fg'"
+          [attr.aria-selected]="drawerTab() === tab.key"
+          (click)="drawerTab.set(tab.key)"
+        >
+          {{ tab.label }}
+        </button>
+        }
+      </div>
+      <button
+        type="button"
+        class="rounded-lg px-2 py-1 text-muted hover:bg-surface hover:text-fg"
+        aria-label="Close"
+        (click)="closeDrawer()"
+      >
+        ✕
+      </button>
+    </header>
+    <div
+      role="tabpanel"
+      class="min-h-0 flex-1 overflow-y-auto p-3"
+    >
+      @if (drawerTab() === 'artifacts') {
+      <app-artifact-list
+        [artifacts]="research.artifactList()"
+        (opened)="research.open($event)"
+      />
+      } @else {
+      <app-source-catalogue-panel [sources]="research.sources()" />
+      }
+    </div>
+    }
+  </aside>
   }
 </div>
 

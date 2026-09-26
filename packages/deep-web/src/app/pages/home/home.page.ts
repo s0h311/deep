@@ -7,6 +7,8 @@ import { Stepper } from '../../components/stepper/stepper'
 import { ResearchState } from '../../models/research-state'
 import { ResearchApi } from '../../services/research-api'
 
+type DrawerTab = 'artifacts' | 'sources'
+
 @Component({
   imports: [ArtifactList, GrillingThread, MarkdownView, SourceCataloguePanel, Stepper],
   templateUrl: 'home.page.html',
@@ -16,6 +18,13 @@ export class HomePage {
   protected readonly message = signal('')
   /** Whether the page is asking the user to confirm a reset. */
   protected readonly confirmingReset = signal(false)
+  /** Whether the drawer with the Artifacts and Sources is open: closed until the user opens it. */
+  protected readonly drawerOpen = signal(false)
+  protected readonly drawerTab = signal<DrawerTab>('artifacts')
+  protected readonly tabs: { key: DrawerTab; label: string }[] = [
+    { key: 'artifacts', label: 'Artifacts' },
+    { key: 'sources', label: 'Sources' },
+  ]
   /**
    * Whether the page offers the message input: to start a Research, answer a Grilling question, or wait for a running
    * Step. A Failed or Completed Research rejects a message and an Interrupted one ignores it, so they get none.
@@ -77,8 +86,15 @@ export class HomePage {
     this.send('')
   }
 
+  /** Closes the drawer along with any Artifact open in it. */
+  protected closeDrawer(): void {
+    this.drawerOpen.set(false)
+    this.research.close()
+  }
+
   protected reset(): void {
     this.confirmingReset.set(false)
+    this.drawerOpen.set(false)
     void this.research.reset()
   }
 

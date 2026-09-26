@@ -75,9 +75,8 @@ export class ResearchApi {
     return report ? { name: report } : undefined
   })
   private readonly content = httpResource.text(() => {
-    // The Grilling Transcript opens as the chat thread.
-    const artifact = this.opened()
-    return artifact && artifact.kind !== 'grilling_transcript' ? artifactUrl(artifact.name) : undefined
+    const name = this.opened()?.name
+    return name ? artifactUrl(name) : undefined
   })
   /** A key for where the loaded Research stands, ignoring any reason, so a poll that finds it unchanged is no change. */
   private readonly stepKey = computed(() => {
@@ -101,11 +100,13 @@ export class ResearchApi {
 
   readonly state = this.lastState.asReadonly()
   readonly artifacts = computed(() => (this.artifactNames.hasValue() ? this.artifactNames.value() : []))
-  /** The Artifacts in Step order, each Review with its verdict once read. */
+  /** The Artifacts in Step order, each Review with its verdict once read. Not the Grilling Transcript: the chat thread is. */
   readonly artifactList = computed<ListedArtifact[]>(() => {
     const verdicts = this.verdicts.hasValue() ? this.verdicts.value() : undefined
 
-    return this.ordered().map((artifact) => ({ ...artifact, verdict: verdicts?.get(artifact.name) }))
+    return this.ordered().flatMap((artifact) =>
+      artifact.kind === 'grilling_transcript' ? [] : [{ ...artifact, verdict: verdicts?.get(artifact.name) }],
+    )
   })
   /** The open Artifact, if it still exists, with the Finding to scroll to if it is the Findings. */
   readonly opened = computed<(Artifact & { finding?: string }) | undefined>(() => {

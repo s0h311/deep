@@ -172,6 +172,11 @@ function button(page: HTMLElement, label: string): HTMLButtonElement | undefined
   return [...page.querySelectorAll('button')].find((item) => item.textContent?.trim() === label)
 }
 
+/** The page's icon button with the given accessible label, if it shows one. */
+function iconButton(page: HTMLElement, label: string): HTMLButtonElement | null {
+  return page.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)
+}
+
 /** The Source Catalogue panel's Sources, each as its text and link target, if it links. */
 function sources(page: HTMLElement): { text: string; href?: string }[] {
   return [...page.querySelectorAll('app-source-catalogue-panel li')].map((item) => ({
@@ -185,8 +190,16 @@ function artifactList(page: HTMLElement): string[] {
   return [...page.querySelectorAll('app-artifact-list li')].map(text)
 }
 
-/** Opens the Artifact with the given label from the Artifact list. */
+/** Opens the drawer on its Sources tab. */
+async function openSources(page: HTMLElement): Promise<void> {
+  await openDrawer(page)
+  button(page, 'Sources')?.click()
+  await settle()
+}
+
+/** Opens the Artifact with the given label from the drawer's Artifact list. */
 async function open(page: HTMLElement, label: string): Promise<void> {
+  await openDrawer(page)
   const entry = [...page.querySelectorAll<HTMLButtonElement>('app-artifact-list button')].find((item) =>
     item.textContent?.trim().startsWith(label),
   )
@@ -198,6 +211,38 @@ async function open(page: HTMLElement, label: string): Promise<void> {
   entry.click()
   await settle()
   await answerArtifactReads()
+}
+
+/** The drawer holding the Artifacts and Sources, if it is open. */
+function drawer(page: HTMLElement): HTMLElement | null {
+  return page.querySelector('aside')
+}
+
+/** The header button that opens and closes the drawer, labelled with the Artifact count. */
+function artifactsButton(page: HTMLElement): HTMLButtonElement | undefined {
+  return [...page.querySelectorAll<HTMLButtonElement>('header button')].find((item) =>
+    item.textContent?.trim().startsWith('Artifacts'),
+  )
+}
+
+/** The header button's label with the Artifact count, if the page shows it. */
+function artifactsLabel(page: HTMLElement): string | undefined {
+  const toggle = artifactsButton(page)
+  return toggle ? text(toggle) : undefined
+}
+
+/** Opens the drawer from the header. */
+async function openDrawer(page: HTMLElement): Promise<void> {
+  if (!drawer(page)) {
+    artifactsButton(page)?.click()
+    await settle()
+    await answerArtifactReads()
+  }
+}
+
+/** The label of the Artifact the drawer's reader shows, if it shows one. */
+function readerTitle(page: HTMLElement): string | undefined {
+  return drawer(page)?.querySelector('header > span')?.textContent?.trim()
 }
 
 /** The Artifact viewer, showing the open Artifact as rendered Markdown. */
@@ -408,13 +453,36 @@ describe('HomePage', () => {
     })
   })
 
-  describe('Source Catalogue panel', () => {
+  describe('drawer', () => {
+    it('is closed on first load and toggles from the header button, which counts the Artifacts but not the Grilling Transcript', async () => {
+      const page = await renderPage({
+        state: { status: 'running', step: 'review', round: 2 },
+        artifacts: ALL_ARTIFACTS,
+      })
+
+      expect(drawer(page)).toBeNull()
+      expect(artifactsLabel(page)).toBe('Artifacts 8')
+
+      await openDrawer(page)
+      expect(drawer(page)).not.toBeNull()
+      expect(artifactsButton(page)?.getAttribute('aria-expanded')).toBe('true')
+
+      artifactsButton(page)?.click()
+      await settle()
+      expect(drawer(page)).toBeNull()
+      expect(artifactsButton(page)?.getAttribute('aria-expanded')).toBe('false')
+    })
+  })
+
+  describe('Sources tab', () => {
     it('lists every Source, linking concrete hosts and showing wildcard patterns as text', async () => {
       const page = await renderPage({
         state: { status: 'running', step: 'retrieval' },
         artifacts: ['heat_pumps_grilling_protocol.md', SOURCE_CATALOGUE],
         sources: ['energy.gov', '*.europa.eu'],
       })
+
+      await openSources(page)
 
       expect(sources(page)).toEqual([
         { text: 'energy.gov', href: 'https://energy.gov' },
@@ -425,7 +493,21 @@ describe('HomePage', () => {
     it('says there is no Source Catalogue before its Step writes it', async () => {
       const page = await renderPage({ state: { status: 'running', step: 'source_catalogue' } })
 
-      expect(page.querySelector('app-source-catalogue-panel')?.textContent).toContain('No Source Catalogue yet.')
+      await openSources(page)
+
+      expect(drawer(page)?.textContent).toContain('No Source Catalogue yet.')
+    })
+
+    it('says when the Source Catalogue is empty', async () => {
+      const page = await renderPage({
+        state: { status: 'failed', reason: 'No Primary Sources were found.' },
+        artifacts: ['heat_pumps_grilling_protocol.md', SOURCE_CATALOGUE],
+        sources: [],
+      })
+
+      await openSources(page)
+
+      expect(drawer(page)?.textContent).toContain('The Source Catalogue is empty.')
     })
 
     it('shows the Source Catalogue once its Step has written it, without a reload', async () => {
@@ -433,6 +515,7 @@ describe('HomePage', () => {
         state: { status: 'interrupted', step: 'source_catalogue' },
         artifacts: ['heat_pumps_grilling_protocol.md'],
       })
+      await openSources(page)
       const http = TestBed.inject(HttpTestingController)
       const stream = stubStream()
 
@@ -456,11 +539,12 @@ describe('HomePage', () => {
   })
 
   describe('Artifacts', () => {
-    it('lists the Artifacts in Step order with readable labels', async () => {
+    it('lists the Artifacts in Step order with readable labels, without the Grilling Transcript', async () => {
       const page = await renderPage({ state: { status: 'interrupted', step: 'retrieval' }, artifacts: ALL_ARTIFACTS })
 
+      await openDrawer(page)
+
       expect(artifactList(page)).toEqual([
-        'Grilling Transcript',
         'Grilling Protocol',
         'Source Catalogue',
         'Findings',
@@ -481,6 +565,9 @@ describe('HomePage', () => {
           'heat_pumps_review_2.md': '---\nverdict: pass\n---\n\n# Review 2\n',
         },
       })
+      await openDrawer(page)
+      iconButton(page, 'All Artifacts')?.click()
+      await settle()
 
       expect(artifactList(page)).toContain('Round 1 · Review Fail')
       expect(artifactList(page)).toContain('Round 2 · Review Pass')
@@ -490,6 +577,7 @@ describe('HomePage', () => {
     it('adds the Artifact a Step writes to the list, without a reload', async () => {
       const artifacts = ['grilling_transcript.json', 'heat_pumps_grilling_protocol.md', SOURCE_CATALOGUE]
       const page = await renderPage({ state: { status: 'interrupted', step: 'retrieval' }, artifacts })
+      await openDrawer(page)
       const stream = stubStream()
 
       button(page, 'Resume')?.click()
@@ -505,7 +593,7 @@ describe('HomePage', () => {
         .flush([...artifacts, 'heat_pumps_findings.md'])
       await settle()
 
-      expect(artifactList(page)).toEqual(['Grilling Transcript', 'Grilling Protocol', 'Source Catalogue', 'Findings'])
+      expect(artifactList(page)).toEqual(['Grilling Protocol', 'Source Catalogue', 'Findings'])
     })
 
     it('renders an opened Artifact as sanitised Markdown, also while a Step is running', async () => {
@@ -528,27 +616,58 @@ describe('HomePage', () => {
       expect(viewer(page)?.querySelector('img')?.getAttribute('onerror')).toBeNull()
     })
 
-    it('goes back from an opened Artifact to the chat', async () => {
+    it('says when there are no Artifacts yet', async () => {
+      const page = await renderPage({ state: { status: 'awaiting_answer' }, artifacts: ['grilling_transcript.json'] })
+
+      await openDrawer(page)
+
+      expect(artifactsLabel(page)).toBe('Artifacts 0')
+      expect(artifactList(page)).toEqual(['No Artifacts yet.'])
+    })
+
+    it('opens an Artifact in the drawer, leaving the conversation in the centre', async () => {
       const page = await renderPage({
-        state: { status: 'completed' },
-        artifacts: ALL_ARTIFACTS,
+        state: { status: 'interrupted', step: 'draft', round: 1 },
+        artifacts: ['grilling_transcript.json', 'heat_pumps_grilling_protocol.md'],
         transcript: {
           question: 'How do heat pumps work?',
           turns: [{ question: 'Who is the audience?', recommendedAnswer: 'Homeowners.', answer: 'Installers.' }],
         },
       })
 
-      button(page, 'Back to the chat')?.click()
-      await settle()
+      await open(page, 'Grilling Protocol')
 
-      expect(viewer(page)).toBeNull()
-      expect(page.querySelector('app-artifact-list [aria-current]')).toBeNull()
+      expect(readerTitle(page)).toBe('Grilling Protocol')
+      expect(drawer(page)?.querySelector('app-markdown-view h1')?.textContent).toBe('heat_pumps_grilling_protocol.md')
+      expect(page.querySelector('main app-markdown-view')).toBeNull()
       expect(thread(page)).toEqual([
         'How do heat pumps work?',
         'Q1 Who is the audience? Recommended answer: Homeowners.',
         'Installers.',
       ])
-      expect(composer(page)).toBe('New research')
+      expect(button(page, 'Resume')).toBeDefined()
+    })
+
+    it('goes back from an opened Artifact to the list', async () => {
+      const page = await renderPage({ state: { status: 'running', step: 'retrieval' }, artifacts: ALL_ARTIFACTS })
+      await open(page, 'Grilling Protocol')
+
+      iconButton(page, 'All Artifacts')?.click()
+      await settle()
+
+      expect(viewer(page)).toBeNull()
+      expect(artifactList(page)).toContain('Grilling Protocol')
+    })
+
+    it('closes the drawer from an opened Artifact', async () => {
+      const page = await renderPage({ state: { status: 'running', step: 'retrieval' }, artifacts: ALL_ARTIFACTS })
+      await open(page, 'Grilling Protocol')
+
+      iconButton(page, 'Close')?.click()
+      await settle()
+
+      expect(drawer(page)).toBeNull()
+      expect(viewer(page)).toBeNull()
     })
 
     it('shows a Review without the front matter its verdict badge comes from', async () => {
@@ -568,37 +687,18 @@ describe('HomePage', () => {
       expect(viewer(page)?.querySelector('hr')).toBeNull()
     })
 
-    it('opens the Grilling Transcript as a read-only Q&A thread after Grilling', async () => {
-      const api: FakeResearch = {
-        state: { status: 'running', step: 'retrieval' },
-        artifacts: ['grilling_transcript.json', 'heat_pumps_grilling_protocol.md'],
-        transcript: {
-          question: 'How do heat pumps work?',
-          turns: [{ question: 'Who is the audience?', recommendedAnswer: 'Homeowners.', answer: 'Installers.' }],
-        },
-      }
-      const page = await renderPage(api)
-      await open(page, 'Grilling Protocol')
-
-      await open(page, 'Grilling Transcript')
-
-      expect(viewer(page)).toBeNull()
-      expect(thread(page)).toEqual([
-        'How do heat pumps work?',
-        'Q1 Who is the audience? Recommended answer: Homeowners.',
-        'Installers.',
-      ])
-      expect(useRecommendation(page)).toBeUndefined()
-    })
-
-    it('opens the Report of a Completed Research', async () => {
+    it('shows the Report when the drawer of a Completed Research opens', async () => {
       const page = await renderPage({
         state: { status: 'completed' },
         artifacts: ALL_ARTIFACTS,
         contents: { 'heat_pumps_report.md': '# Report\n\n## Summary\n\nHeat pumps move heat [F1].\n' },
       })
 
-      expect(page.querySelector('app-artifact-list [aria-current]')?.textContent?.trim()).toBe('Report')
+      expect(drawer(page)).toBeNull()
+
+      await openDrawer(page)
+
+      expect(readerTitle(page)).toBe('Report')
       expect(viewer(page)?.querySelector('h2')?.textContent).toBe('Summary')
       expect(viewer(page)?.querySelector('a')?.getAttribute('href')).toBe('#F1')
     })
@@ -611,6 +711,7 @@ describe('HomePage', () => {
         contents: { 'heat_pumps_report.md': '# Report\n\n## Summary\n\nHeat pumps move heat.\n' },
       }
       const page = await renderPage(api)
+      await openDrawer(page)
       const stream = stubStream()
 
       button(page, 'Resume')?.click()
@@ -628,7 +729,7 @@ describe('HomePage', () => {
       await settle()
       await answerArtifactReads()
 
-      expect(page.querySelector('app-artifact-list [aria-current]')?.textContent?.trim()).toBe('Report')
+      expect(readerTitle(page)).toBe('Report')
       expect(viewer(page)?.querySelector('h1')?.textContent).toBe('Report')
     })
 
@@ -702,7 +803,7 @@ describe('HomePage', () => {
         await answerArtifactReads()
 
         expect(viewer(page)?.querySelector('h1')?.textContent).toBe('Findings')
-        expect(page.querySelector('app-artifact-list [aria-current]')?.textContent?.trim()).toBe('Findings')
+        expect(readerTitle(page)).toBe('Findings')
         expect(scrolled.mock.contexts.map((heading) => heading.textContent)).toEqual(['F2'])
       })
 
@@ -965,7 +1066,7 @@ describe('HomePage', () => {
 
       expect(page.querySelector('[role="alertdialog"]')).toBeNull()
       TestBed.inject(HttpTestingController).expectNone({ method: 'DELETE', url: '/api/research' })
-      expect(page.textContent).toContain('q.report.md')
+      expect(artifactsLabel(page)).toBe('Artifacts 1')
     })
 
     it('deletes the Research once confirmed and shows the empty state', async () => {
@@ -980,7 +1081,7 @@ describe('HomePage', () => {
       await settle()
 
       expect(page.textContent).toContain('What do you want to research?')
-      expect(page.textContent).not.toContain('q.report.md')
+      expect(artifactsButton(page)).toBeUndefined()
       expect(page.querySelector('[role="alertdialog"]')).toBeNull()
     })
 
@@ -1031,7 +1132,7 @@ describe('HomePage', () => {
       await settle()
 
       expect(page.querySelector('app-stepper')?.textContent).toContain('Completed')
-      expect(page.textContent).toContain('q.report.md')
+      expect(artifactsLabel(page)).toBe('Artifacts 1')
     })
   })
 
