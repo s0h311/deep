@@ -1,121 +1,826 @@
-import { type AgentConfig, streamAgent } from '~/src/infrastructure/agent/client.ts'
-import { claudeHaiku45, webSearchTool } from '~/src/infrastructure/agent/providers/anthropic.ts'
+import { z } from 'zod'
+import { HumanMessage, SystemMessage } from '@langchain/core/messages'
+import { copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { domainToASCII } from 'node:url'
+import { runAgent } from '../../infrastructure/agent/client.ts'
+import { chatModel } from '../../infrastructure/agent/model.ts'
+import { webSearchTool, webToolsFor } from '../../infrastructure/agent/providers/anthropic.ts'
+import { type Script, structuredResponse } from '../../infrastructure/agent/scripted-chat-model.ts'
+import type { Model } from '../../infrastructure/agent/types.ts'
+import { defined } from '../../infrastructure/utils/utils.ts'
+import { appSkill, researchDirectory } from './paths.ts'
 
-const SKILLS: string[] = ['.agents/skills/grilling']
-const RESEARCH_ROOT_DIRECTORY = '.research'
+export type ResearchEvent =
+  | { type: 'step'; step: 'grilling' | 'awaiting_answer' | 'source_catalogue' | 'retrieval' | 'completed' }
+  | { type: 'step'; step: 'draft' | 'review'; round: number }
+  | { type: 'step'; step: 'failed'; reason: string }
+  | { type: 'text'; text: string }
 
-type Step = 'grilling' | 'create_catalogue' | 'retrieval' | `draft_${number}` | `review_${number}` | 'done' | 'fail'
+/** A message the Research can't take in its state, e.g. one sent to a Failed Research. */
+export class ResearchConflict extends Error {
+  override name = 'ResearchConflict'
+}
 
-type Update =
-  | {
-      type: 'step'
-      value: Step
-    }
-  | {
-      id: string
-      message: string
-    }
+/** A name that is no Artifact of the Research. */
+export class ArtifactNotFound extends Error {
+  override name = 'ArtifactNotFound'
+}
+
+/** A Step whose agent failed on every attempt, leaving the Research Interrupted. */
+class StepInterrupted extends Error {
+  override name = 'StepInterrupted'
+}
+
+export type Emit = (event: ResearchEvent) => void | Promise<void>
+
+/** What a running send hands each Step: where its progress goes, and the signal that aborts its agent calls. */
+type StepContext = { emit: Emit; signal: AbortSignal }
+
+export type Research = {
+  /** Advances the Research according to its state, emitting progress until a terminal step value. */
+  send(message: string, emit: Emit): Promise<void>
+  /** The names of the Artifacts produced so far, including any Grilling Transcript, sorted. */
+  listArtifacts(): Promise<string[]>
+  /** The content of the Artifact with the given name. */
+  readArtifact(name: string): Promise<string>
+  /** Aborts any running Step, then deletes every Artifact, so the next message starts a new Research. */
+  reset(): Promise<void>
+}
 
 type ResearchConfig = {
-  question: string
-  // TODO make create_catalogue optional by accepting a catalogue as input
-  // TODO make grilling optional, or maybe not
-  writerFn: (step: Update) => Promise<void>
+  model?: Model
+  /** The directory holding the Research's Artifacts. */
+  root?: string
 }
 
-const MAX_REVIEW_ROUNDS = 3
+type GrillingProtocol = z.infer<typeof grillingProtocol>
 
-export async function research(config: ResearchConfig): Promise<void> {
-  const { question, writerFn } = config
+type SourceCatalogue = z.infer<typeof sourceCatalogue>
 
-  const threadId = crypto.randomUUID()
+type Finding = z.infer<typeof finding>
 
-  writerFn({ type: 'step', value: 'grilling' })
-  const topicName = await grill(threadId, config)
+type Draft = z.infer<typeof draft>
 
-  writerFn({ type: 'step', value: 'create_catalogue' })
-  await createCatalogue(question)
+type Review = z.infer<typeof review>
 
-  writerFn({ type: 'step', value: 'retrieval' })
-  await retrieveInformation(question, topicName)
+type Verdict = Review['verdict']
 
-  let reviewRounds = 0
-  let reviewPassed: boolean = false
+/** One Draft followed by its Review, numbered from 1. */
+type Round = { topic: string; round: number }
 
-  while (reviewRounds < MAX_REVIEW_ROUNDS && !reviewPassed) {
-    reviewRounds++
+type GrillingTurn = { question: string; recommendedAnswer: string; answer?: string }
 
-    writerFn({ type: 'step', value: `draft_${reviewRounds}` })
-    await draft(topicName)
+/** The Grilling Step's interim Artifact, deleted once the Grilling Protocol is written. */
+type GrillingTranscript = { question: string; turns: GrillingTurn[] }
 
-    writerFn({ type: 'step', value: `review_${reviewRounds}` })
-    reviewPassed = await review(topicName)
+const GRILLING_TRANSCRIPT = 'grilling_transcript.json'
+const GRILLING_PROTOCOL_SUFFIX = '_grilling_protocol.md'
+const SOURCE_CATALOGUE_SUFFIX = '_source_catalogue.json'
+const FINDINGS_SUFFIX = '_findings.md'
+const REPORT_SUFFIX = '_report.md'
+/** The heading of the first Finding; a Findings file without it has no entries. */
+const FIRST_FINDING = /^## F1$/m
+const MAX_TOPIC_SLUG_LENGTH = 50
+/** For a Topic with no ASCII letters or digits to keep. */
+const FALLBACK_TOPIC_SLUG = 'research'
+const MAX_HOSTNAME_LENGTH = 253
+/** A DNS label: 1–63 letters, digits or hyphens, not starting or ending with a hyphen. */
+const HOSTNAME_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
+/** A top-level label: letters only, or punycode; this rules out IP addresses. */
+const TOP_LEVEL_LABEL = /^(?:[a-z]{2,63}|xn--[a-z0-9-]+)$/
+
+const grillingProtocol = z.object({
+  scope: z.string(),
+  goal: z.string(),
+  audience: z.string(),
+  openAssumptions: z.array(z.string()),
+})
+
+const grillingQuestion = z.object({
+  question: z.string(),
+  recommendedAnswer: z.string(),
+})
+
+const grillingConclusion = z.object({
+  done: z.literal(true),
+  topic: z.string(),
+  protocol: grillingProtocol,
+})
+
+/** Either a question or a conclusion, flattened into one object as the model's tool input must be an object. */
+const grillingResponse = z.object({
+  question: z.string().optional().describe('Your next question, while scope, goal or audience are still open.'),
+  recommendedAnswer: z.string().optional().describe('Your recommended answer to the question.'),
+  done: z.boolean().optional().describe('true once scope, goal and audience are settled.'),
+  topic: z.string().optional().describe('A short name for the Research, a few words long.'),
+  protocol: grillingProtocol.optional().describe('The agreed scope, goal and audience, plus any open assumptions.'),
+})
+
+const grillingOutcome = z.union([grillingConclusion, grillingQuestion])
+
+const sourceCatalogue = z.object({
+  sources: z.array(z.string()).describe('Bare hosts of the Primary Sources, e.g. "ecb.europa.eu".'),
+})
+
+const finding = z.object({
+  statement: z.string().describe('What the source states, in your own words.'),
+  url: z.string().describe('The exact URL of the page the quote is taken from.'),
+  quote: z.string().describe('The passage backing the statement, quoted verbatim from the page.'),
+})
+
+const retrieval = z.object({
+  findings: z.array(finding).describe('Every Finding you gathered, each from a host in the Source Catalogue.'),
+})
+
+const draft = z.object({
+  summary: z.string().describe('A short answer to the Research question, citing Findings inline as [Fn].'),
+  keyFacts: z.array(z.string()).describe('The key facts, each citing the Findings backing it inline as [Fn].'),
+  gaps: z.array(z.string()).describe('What the Research wanted to know but no Finding backs.'),
+  followUpQuestions: z.array(z.string()).describe('Questions worth researching next.'),
+})
+
+const review = z.object({
+  verdict: z.enum(['pass', 'fail']).describe('pass only if every Claim cites a Finding that supports it.'),
+  offendingClaims: z
+    .array(
+      z.object({
+        claim: z.string().describe('The Claim, quoted from the Draft.'),
+        reason: z.string().describe('Why it fails: no citation, or a cited Finding that does not support it.'),
+      }),
+    )
+    .describe('Every Claim that fails; empty on pass.'),
+})
+
+const GRILLING_SYSTEM_PROMPT = `You run the Grilling Step of a Research: interview the researcher about the scope, goal and audience of their Research, following the grilling skill.
+You are given the researcher's question and the interview so far. Respond with either your next question and your recommended answer to it, or, once scope, goal and audience are settled, conclude with a Topic and the Grilling Protocol.`
+
+const SOURCE_CATALOGUE_SYSTEM_PROMPT = `You run the Source Catalogue Step of a Research: find the Primary Sources relevant to it, following the source-catalogue skill.
+You are given the Grilling Protocol of the Research. Search the web as much as you need, then respond with the bare hosts of the Primary Sources.`
+
+const RETRIEVAL_SYSTEM_PROMPT = `You run the Retrieval Step of a Research: gather raw, quoted Findings from its Primary Sources, following the retrieval skill.
+You are given the Grilling Protocol and the Source Catalogue of the Research. Search and read only the hosts in the Source Catalogue, then respond with every Finding you gathered.`
+
+const DRAFT_SYSTEM_PROMPT = `You run the Draft Step of a Research: write the Report from its Findings, following the draft skill.
+You are given the Grilling Protocol and the Findings of the Research, and from the second Round on, the previous Draft and its failing Review. Respond with the summary, key facts, Gaps and follow-up questions, citing the Finding behind every Claim inline as [Fn].`
+
+const REVIEW_SYSTEM_PROMPT = `You run the Review Step of a Research: check that every Claim in a Draft cites a Finding that supports it, following the review skill.
+You are given the Draft and the Findings of the Research. Respond with your verdict and every offending Claim.`
+
+const NO_PRIMARY_SOURCES = 'No Primary Source could be identified for the Research.'
+const NO_FINDINGS = 'Retrieval found no Findings on the Primary Sources of the Research.'
+const ALL_ROUNDS_FAILED = 'The Draft failed Review in every Round.'
+const RESET_FIRST = 'The Research has ended; reset first to start a new one.'
+const RESET = 'The Research was reset.'
+const STEP_RUNNING = 'A Step is running; wait for it to finish or reset.'
+
+const MAX_GRILLING_QUESTIONS = 5
+const MAX_ROUNDS = 3
+/** A Step's agent gets one retry after an error or schema-invalid output. */
+const STEP_ATTEMPTS = 2
+
+const CONCLUDE_INSTRUCTION = `You have asked ${MAX_GRILLING_QUESTIONS} questions, the maximum. Conclude now with a Topic and the Grilling Protocol, recording every unresolved point as an open assumption.`
+
+/**
+ * Grilling asks one question, then concludes once it is answered; the Source Catalogue lists two central banks,
+ * Retrieval finds one Finding on each, and the Draft citing both passes Review.
+ */
+const fakeScript: Script = (messages) => {
+  const system = messages.find((message) => SystemMessage.isInstance(message))?.text ?? ''
+
+  if (system.includes(SOURCE_CATALOGUE_SYSTEM_PROMPT)) {
+    return structuredResponse({ sources: ['ecb.europa.eu', 'federalreserve.gov'] })
   }
 
-  if (!reviewPassed) {
-    writerFn({ type: 'step', value: 'fail' })
-
-    return
-  }
-
-  writerFn({ type: 'step', value: 'done' })
-}
-
-const agentConfig: AgentConfig = {
-  model: claudeHaiku45,
-  tools: [webSearchTool],
-  systemPrompt: '',
-  middleware: [
-    // TODO maybe use this: todoListMiddleware
-  ],
-  rootDir: RESEARCH_ROOT_DIRECTORY,
-  skills: SKILLS,
-}
-
-async function grill(threadId: string, { question, writerFn }: ResearchConfig): Promise<string> {
-  const systemPrompt = `The user wants to conduct research about a topic. Before anything we have to clarify the scope and the goal of the research.
-Use /grilling skill to start a grilling session. When every gap is closed. Save the protocol of the grilling session
-in <topic-name>_grilling_protocol.md. Also return the name of the topic in XML Tags. Example: <topic-name>Arabica_Beans</topic-name>.`
-
-  const agentConfig: AgentConfig = {
-    model: claudeHaiku45,
-    tools: [webSearchTool],
-    systemPrompt,
-    rootDir: RESEARCH_ROOT_DIRECTORY,
-    skills: SKILLS,
-  }
-
-  const stream = await streamAgent({
-    message: question,
-    threadId,
-    agentConfig,
-  })
-
-  let name: string = ''
-
-  for await (const message of stream.messages) {
-    const text = await message.text
-
-    const matches = text.match(/<topic-name>(.*)<\/topic-name>/) ?? []
-    if (matches.length >= 2) {
-      name = matches[1]
-    }
-
-    await writerFn({
-      id: crypto.randomUUID(),
-      message: text,
+  if (system.includes(DRAFT_SYSTEM_PROMPT)) {
+    return structuredResponse({
+      summary: 'The ECB [F1] and the Fed [F2] each set their own policy rates.',
+      keyFacts: ['The ECB sets three key interest rates for the euro area [F1].'],
+      gaps: ['How the two central banks coordinate, if at all.'],
+      followUpQuestions: ['How have both policy rates moved since 2020?'],
     })
   }
 
-  return name
+  if (system.includes(REVIEW_SYSTEM_PROMPT)) {
+    return structuredResponse({ verdict: 'pass', offendingClaims: [] })
+  }
+
+  if (system.includes(RETRIEVAL_SYSTEM_PROMPT)) {
+    return structuredResponse({
+      findings: [
+        {
+          statement: 'The ECB sets three key interest rates for the euro area.',
+          url: 'https://www.ecb.europa.eu/stats/policy_and_exchange_rates/key_ecb_interest_rates/html/index.en.html',
+          quote: 'The Governing Council of the ECB sets the key interest rates for the euro area',
+        },
+        {
+          statement: 'The FOMC sets a target range for the federal funds rate.',
+          url: 'https://www.federalreserve.gov/monetarypolicy/openmarket.htm',
+          quote: 'The FOMC sets a target range for the federal funds rate',
+        },
+      ],
+    })
+  }
+
+  return messages.some((message) => HumanMessage.isInstance(message) && message.text.includes('\nAnswer: '))
+    ? structuredResponse({
+        done: true,
+        topic: 'Fake Research',
+        protocol: {
+          scope: 'Whatever the question asks, as of today.',
+          goal: 'A first overview.',
+          audience: 'Someone curious but new to the topic.',
+          openAssumptions: ['No particular geography or time frame.'],
+        },
+      })
+    : structuredResponse({
+        question: 'Who is the audience of the Report?',
+        recommendedAnswer: 'Yourself: someone curious but new to the topic.',
+      })
 }
 
-async function createCatalogue(question: ResearchConfig['question']): Promise<void> {}
+export function createResearch({
+  model = chatModel(fakeScript),
+  root = researchDirectory(),
+}: ResearchConfig = {}): Research {
+  /** The content of the Artifact with the given name. */
+  async function read(name: string): Promise<string> {
+    return await readFile(join(root, name), 'utf8')
+  }
 
-async function retrieveInformation(question: ResearchConfig['question'], topicName: string): Promise<void> {}
+  /** Runs one Grilling turn, returning the Topic once Grilling concludes. */
+  async function grill(transcript: GrillingTranscript, context: StepContext): Promise<string | undefined> {
+    await context.emit({ type: 'step', step: 'grilling' })
 
-async function draft(topicName: string): Promise<void> {}
+    // At the cap, the agent is told to conclude, and only a conclusion is accepted.
+    const mustConclude = transcript.turns.length >= MAX_GRILLING_QUESTIONS
+    // Saved before the agent runs, so an Interrupted Grilling keeps the question and the latest answer.
+    await saveTranscript(transcript)
 
-async function review(topicName: string): Promise<boolean> {
-  return true
+    const outcome = await retried({ step: 'Grilling', signal: context.signal }, async () =>
+      (mustConclude ? grillingConclusion : grillingOutcome).parse(
+        await runAgent({
+          model,
+          systemPrompt: GRILLING_SYSTEM_PROMPT,
+          message: [renderTranscript(transcript), ...(mustConclude ? [CONCLUDE_INSTRUCTION] : [])].join('\n\n'),
+          responseFormat: mustConclude ? grillingConclusion : grillingResponse,
+          skill: appSkill('grilling'),
+          signal: context.signal,
+        }),
+      ),
+    )
+
+    if ('done' in outcome) {
+      const topic = slugify(outcome.topic)
+
+      await writeFile(join(root, protocolName(topic)), renderProtocol(transcript.question, outcome.protocol))
+      await rm(join(root, GRILLING_TRANSCRIPT), { force: true })
+
+      return topic
+    }
+
+    transcript.turns.push(outcome)
+
+    await saveTranscript(transcript)
+
+    await context.emit({ type: 'text', text: renderQuestion(outcome, transcript.turns.length) })
+    await context.emit({ type: 'step', step: 'awaiting_answer' })
+
+    return undefined
+  }
+
+  /** Runs the Source Catalogue Step, returning whether the Research goes on. */
+  async function catalogueSources(topic: string, context: StepContext): Promise<boolean> {
+    await context.emit({ type: 'step', step: 'source_catalogue' })
+
+    const message = await read(protocolName(topic))
+    const { sources } = await retried({ step: 'Source Catalogue', signal: context.signal }, () =>
+      runAgent({
+        model,
+        systemPrompt: SOURCE_CATALOGUE_SYSTEM_PROMPT,
+        message,
+        responseFormat: sourceCatalogue,
+        tools: [webSearchTool],
+        skill: appSkill('source-catalogue'),
+        signal: context.signal,
+      }),
+    )
+
+    const hosts = normaliseHosts(sources)
+
+    // An empty Source Catalogue is kept: it records that the Research failed.
+    await writeFile(join(root, catalogueName(topic)), JSON.stringify({ sources: hosts }, null, 2))
+
+    if (!hosts.length) {
+      await context.emit({ type: 'step', step: 'failed', reason: NO_PRIMARY_SOURCES })
+    }
+
+    return hosts.length > 0
+  }
+
+  /** Runs the Retrieval Step, returning whether the Research goes on. */
+  async function retrieve(topic: string, context: StepContext): Promise<boolean> {
+    await context.emit({ type: 'step', step: 'retrieval' })
+
+    const { sources } = await readSourceCatalogue(topic)
+    const message = [await read(protocolName(topic)), renderSourceCatalogue(sources)].join('\n\n')
+    const { findings } = await retried({ step: 'Retrieval', signal: context.signal }, () =>
+      runAgent({
+        model,
+        systemPrompt: RETRIEVAL_SYSTEM_PROMPT,
+        message,
+        responseFormat: retrieval,
+        tools: webToolsFor(sources),
+        skill: appSkill('retrieval'),
+        signal: context.signal,
+      }),
+    )
+
+    const valid = findings.filter(({ url }) => isOnSource(url, sources))
+
+    // A Findings file with no entries is kept: it records that the Research failed.
+    await writeFile(join(root, findingsName(topic)), renderFindings(valid))
+
+    if (!valid.length) {
+      await context.emit({ type: 'step', step: 'failed', reason: NO_FINDINGS })
+    }
+
+    return valid.length > 0
+  }
+
+  /** Runs the Draft Step of the Round. */
+  async function writeDraft({ topic, round }: Round, context: StepContext): Promise<void> {
+    await context.emit({ type: 'step', step: 'draft', round })
+
+    const findings = await read(findingsName(topic))
+    // From Round 2, the agent revises the previous Draft against its failing Review.
+    const previous =
+      round > 1 ? [await read(draftName(topic, round - 1)), await read(reviewName(topic, round - 1))] : []
+    const message = [await read(protocolName(topic)), findings, ...previous].join('\n\n')
+    const response = await retried({ step: 'Draft', signal: context.signal }, () =>
+      runAgent({
+        model,
+        systemPrompt: DRAFT_SYSTEM_PROMPT,
+        message,
+        responseFormat: draft,
+        skill: appSkill('draft'),
+        signal: context.signal,
+      }),
+    )
+
+    await writeFile(join(root, draftName(topic, round)), renderDraft(response, parseFindingUrls(findings)))
+  }
+
+  /** Runs the Review Step of the Round, returning its verdict. */
+  async function reviewDraft({ topic, round }: Round, context: StepContext): Promise<Verdict> {
+    await context.emit({ type: 'step', step: 'review', round })
+
+    const message = [await read(draftName(topic, round)), await read(findingsName(topic))].join('\n\n')
+    const response = await retried({ step: 'Review', signal: context.signal }, () =>
+      runAgent({
+        model,
+        systemPrompt: REVIEW_SYSTEM_PROMPT,
+        message,
+        responseFormat: review,
+        skill: appSkill('review'),
+        signal: context.signal,
+      }),
+    )
+
+    await writeFile(join(root, reviewName(topic, round)), renderReview(response, round))
+
+    return response.verdict
+  }
+
+  async function readVerdict({ topic, round }: Round): Promise<Verdict> {
+    const verdict = (await read(reviewName(topic, round))).match(/^---\nverdict: (\w+)\n/)?.[1]
+
+    return review.shape.verdict.parse(verdict)
+  }
+
+  async function hasFindings(topic: string): Promise<boolean> {
+    return FIRST_FINDING.test(await read(findingsName(topic)))
+  }
+
+  async function readSourceCatalogue(topic: string): Promise<SourceCatalogue> {
+    return sourceCatalogue.parse(JSON.parse(await read(catalogueName(topic))))
+  }
+
+  /** The names of all Artifacts, including any Grilling Transcript. */
+  async function artifactNames(): Promise<string[]> {
+    return (await ifExists(readdir(root))) ?? []
+  }
+
+  /** The Grilling transcript, if Grilling has started. */
+  async function readTranscript(): Promise<GrillingTranscript | undefined> {
+    const transcript = await ifExists(read(GRILLING_TRANSCRIPT))
+
+    return transcript === undefined ? undefined : JSON.parse(transcript)
+  }
+
+  async function saveTranscript(transcript: GrillingTranscript): Promise<void> {
+    await mkdir(root, { recursive: true })
+    await writeFile(join(root, GRILLING_TRANSCRIPT), JSON.stringify(transcript, null, 2))
+  }
+
+  /** Advances the Research from the state its Artifacts describe. */
+  async function advance(message: string, context: StepContext): Promise<void> {
+    const names = await artifactNames()
+    const protocol = names.find((name) => name.endsWith(GRILLING_PROTOCOL_SUFFIX))
+    let topic = protocol?.slice(0, -GRILLING_PROTOCOL_SUFFIX.length)
+
+    if (topic === undefined) {
+      const transcript = (await readTranscript()) ?? { question: message, turns: [] }
+      const last = transcript.turns.at(-1)
+
+      // Only an unanswered question takes the message; otherwise Grilling was Interrupted and the message is ignored.
+      if (last && last.answer === undefined) {
+        last.answer = message
+      }
+
+      topic = await grill(transcript, context)
+
+      if (topic === undefined) {
+        return
+      }
+    }
+
+    if (!names.includes(catalogueName(topic))) {
+      if (!(await catalogueSources(topic, context))) {
+        return
+      }
+    } else if (!(await readSourceCatalogue(topic)).sources.length) {
+      // An empty Source Catalogue means Failed.
+      throw new ResearchConflict(RESET_FIRST)
+    }
+
+    if (!names.includes(findingsName(topic))) {
+      if (!(await retrieve(topic, context))) {
+        return
+      }
+    } else if (!(await hasFindings(topic))) {
+      // A Findings file with no entries means Failed.
+      throw new ResearchConflict(RESET_FIRST)
+    }
+
+    if (names.includes(reportName(topic))) {
+      throw new ResearchConflict(RESET_FIRST)
+    }
+
+    let round = Math.max(1, lastRound(topic, names))
+    let verdict = names.includes(reviewName(topic, round)) ? await readVerdict({ topic, round }) : undefined
+
+    if (verdict === 'fail' && round === MAX_ROUNDS) {
+      // A failed last Round means Failed.
+      throw new ResearchConflict(RESET_FIRST)
+    }
+
+    while (verdict !== 'pass') {
+      if (verdict === 'fail') {
+        if (round === MAX_ROUNDS) {
+          await context.emit({ type: 'step', step: 'failed', reason: ALL_ROUNDS_FAILED })
+
+          return
+        }
+
+        round += 1
+      }
+
+      // A Draft without its Review is reviewed, not drafted again.
+      if (!names.includes(draftName(topic, round))) {
+        await writeDraft({ topic, round }, context)
+      }
+
+      verdict = await reviewDraft({ topic, round }, context)
+    }
+
+    await copyFile(join(root, draftName(topic, round)), join(root, reportName(topic)))
+    await context.emit({ type: 'step', step: 'completed' })
+  }
+
+  /** The send or reset in progress, whose controller aborts its agent calls. */
+  let current: { controller: AbortController; settled: Promise<void> } | undefined
+
+  /** Runs the task as the one in progress until it settles. */
+  async function exclusively(task: (signal: AbortSignal) => Promise<void>): Promise<void> {
+    const controller = new AbortController()
+    const run = task(controller.signal)
+    current = { controller, settled: run.catch(() => {}) }
+
+    try {
+      await run
+    } finally {
+      if (current.controller === controller) {
+        current = undefined
+      }
+    }
+  }
+
+  return {
+    async send(message, emit) {
+      if (current) {
+        throw new ResearchConflict(STEP_RUNNING)
+      }
+
+      await exclusively(async (signal) => {
+        try {
+          await advance(message, { emit, signal })
+        } catch (error) {
+          if (signal.aborted) {
+            await emit({ type: 'step', step: 'failed', reason: RESET })
+
+            return
+          }
+
+          if (!(error instanceof StepInterrupted)) {
+            throw error
+          }
+
+          await emit({ type: 'step', step: 'failed', reason: error.message })
+        }
+      })
+    },
+
+    async reset() {
+      const previous = current
+      previous?.controller.abort()
+
+      // The aborted run settles before the wipe, so none of its writes outlive it.
+      await exclusively(async () => {
+        await previous?.settled
+        await rm(root, { recursive: true, force: true })
+      })
+    },
+
+    async listArtifacts() {
+      return (await artifactNames()).toSorted()
+    },
+
+    async readArtifact(name) {
+      if (!(await artifactNames()).includes(name)) {
+        throw new ArtifactNotFound(`No Artifact named ${name}.`)
+      }
+
+      return await read(name)
+    },
+  }
+}
+
+/**
+ * Runs a Step's agent call, retrying it after an error or schema-invalid output; once the attempts run out, the
+ * Step is interrupted.
+ */
+async function retried<Response>(
+  { step, signal }: { step: string; signal: AbortSignal },
+  run: () => Promise<Response>,
+): Promise<Response> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await run()
+    } catch (error) {
+      // An aborted Step is not retried.
+      if (signal.aborted) {
+        throw error
+      }
+
+      if (attempt >= STEP_ATTEMPTS) {
+        throw new StepInterrupted(
+          `The ${step} Step failed ${STEP_ATTEMPTS} times (${error instanceof Error ? error.message : String(error)}); send a message to resume.`,
+          { cause: error },
+        )
+      }
+    }
+  }
+}
+
+/** The promise's value, or undefined if it rejects because the file or directory doesn't exist. */
+async function ifExists<T>(promise: Promise<T>): Promise<T | undefined> {
+  try {
+    return await promise
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return undefined
+    }
+
+    throw error
+  }
+}
+
+function protocolName(topic: string): string {
+  return `${topic}${GRILLING_PROTOCOL_SUFFIX}`
+}
+
+function catalogueName(topic: string): string {
+  return `${topic}${SOURCE_CATALOGUE_SUFFIX}`
+}
+
+function findingsName(topic: string): string {
+  return `${topic}${FINDINGS_SUFFIX}`
+}
+
+function reportName(topic: string): string {
+  return `${topic}${REPORT_SUFFIX}`
+}
+
+function draftName(topic: string, round: number): string {
+  return `${topic}_draft_${round}.md`
+}
+
+function reviewName(topic: string, round: number): string {
+  return `${topic}_review_${round}.md`
+}
+
+/** The number of the latest Round with a Draft, 0 before the first. */
+function lastRound(topic: string, names: string[]): number {
+  const rounds = names.flatMap((name) => {
+    const [, prefix, round] = name.match(/^(.+)_draft_(\d+)\.md$/) ?? []
+
+    return prefix === topic ? [Number(round)] : []
+  })
+
+  return Math.max(0, ...rounds)
+}
+
+/** The URL of each Finding in a rendered Findings file, by its ID. */
+function parseFindingUrls(findings: string): Map<string, string> {
+  return new Map(
+    findings
+      .split(/^## /m)
+      .slice(1)
+      .flatMap((entry) => {
+        const id = entry.match(/^F\d+$/m)?.[0]
+        const url = entry.match(/^URL: (.+)$/m)?.[1]
+
+        return id && url ? [[id, url] as const] : []
+      }),
+  )
+}
+
+/** The Draft with a Sources section listing only the Findings it cites, grouped by host. */
+function renderDraft({ summary, keyFacts, gaps, followUpQuestions }: Draft, findingUrls: Map<string, string>): string {
+  return `# Report
+
+## Summary
+
+${summary}
+
+## Key facts
+
+${bulletList(keyFacts)}
+
+## Gaps
+
+${bulletList(gaps)}
+
+## Follow-up questions
+
+${bulletList(followUpQuestions)}
+
+## Sources
+
+${renderSources([summary, ...keyFacts, ...gaps, ...followUpQuestions].join('\n'), findingUrls)}
+`
+}
+
+/** The cited Findings' URLs grouped by host, hosts in order of first citation; citations of unknown IDs are ignored. */
+function renderSources(text: string, findingUrls: Map<string, string>): string {
+  const cited = [
+    ...new Set([...text.matchAll(/\[(F\d+(?:\s*,\s*F\d+)*)\]/g)].flatMap(([, ids]) => ids.split(/\s*,\s*/))),
+  ]
+    .filter((id) => findingUrls.has(id))
+    .toSorted((a, b) => Number(a.slice(1)) - Number(b.slice(1)))
+  const byHost = Map.groupBy(cited, (id) => new URL(defined(findingUrls.get(id))).hostname)
+
+  if (!byHost.size) {
+    return 'None.'
+  }
+
+  return [...byHost]
+    .map(([host, ids]) => `### ${host}\n\n${ids.map((id) => `- [${id}] ${findingUrls.get(id)}`).join('\n')}`)
+    .join('\n\n')
+}
+
+function renderReview({ verdict, offendingClaims }: Review, round: number): string {
+  return `---
+verdict: ${verdict}
+---
+
+# Review ${round}
+
+## Offending Claims
+
+${bulletList(offendingClaims.map(({ claim, reason }) => `${claim}\n  - ${reason}`))}
+`
+}
+
+/** The items as a Markdown list, or `None.` if there are none. */
+function bulletList(items: string[]): string {
+  return items.length ? items.map((item) => `- ${item}`).join('\n') : 'None.'
+}
+
+function renderTranscript({ question, turns }: GrillingTranscript): string {
+  const interview = turns.map(
+    (turn, index) =>
+      `Q${index + 1}: ${turn.question}\nRecommended answer: ${turn.recommendedAnswer}\nAnswer: ${turn.answer}`,
+  )
+
+  return [`Research question: ${question}`, ...interview].join('\n\n')
+}
+
+function renderQuestion({ question, recommendedAnswer }: GrillingTurn, number: number): string {
+  return `❓ **Q${number}**: ${question}\n\n➡️ ${recommendedAnswer}`
+}
+
+function renderProtocol(question: string, { scope, goal, audience, openAssumptions }: GrillingProtocol): string {
+  return `# Grilling Protocol
+
+## Question
+
+${question}
+
+## Scope
+
+${scope}
+
+## Goal
+
+${goal}
+
+## Audience
+
+${audience}
+
+## Open assumptions
+
+${bulletList(openAssumptions)}
+`
+}
+
+/** Whether the URL's host is one of the Sources or a subdomain of one; a malformed URL is on none. */
+function isOnSource(url: string, sources: string[]): boolean {
+  if (!URL.canParse(url)) {
+    return false
+  }
+
+  const hostname = new URL(url).hostname.replace(/\.$/, '')
+
+  return sources.some((source) => hostname === source || hostname.endsWith(`.${source}`))
+}
+
+function renderSourceCatalogue(sources: string[]): string {
+  return `# Source Catalogue\n\n${sources.map((source) => `- ${source}`).join('\n')}\n`
+}
+
+/** The Findings with their IDs F1…Fn, each showing the statement, the URL and the verbatim quote. */
+function renderFindings(findings: Finding[]): string {
+  const entries = findings.map(
+    ({ statement, url, quote }, index) =>
+      `## F${index + 1}\n\n${statement}\n\nURL: ${url}\n\n${quote
+        .split('\n')
+        .map((line) => `> ${line}`)
+        .join('\n')}\n`,
+  )
+
+  return ['# Findings\n', ...(entries.length ? entries : ['None.\n'])].join('\n')
+}
+
+/**
+ * The agent's Sources as bare, lowercase, unique ASCII hosts, so they match URL hostnames. A leading `*.` is dropped,
+ * as a host covers its subdomains anyway, as is a trailing `.`; an internationalised host is punycoded. Entries
+ * with a scheme, path, port, other wildcard or whitespace are rejected, as is anything that isn't a public hostname:
+ * empty or malformed labels, a single label such as `localhost`, or an IP address.
+ */
+function normaliseHosts(sources: string[]): string[] {
+  const hosts = sources
+    .map((source) => source.trim().toLowerCase().replace(/^\*\./, '').replace(/\.$/, ''))
+    .filter((host) => /^[^\s/:*?#@]+$/.test(host))
+    .map((host) => domainToASCII(host))
+    .filter(isHostname)
+
+  return [...new Set(hosts)]
+}
+
+/** Whether the ASCII host is a hostname with at least two labels and a top-level label that isn't numeric. */
+function isHostname(host: string): boolean {
+  const labels = host.split('.')
+
+  return (
+    host.length <= MAX_HOSTNAME_LENGTH &&
+    labels.length > 1 &&
+    labels.every((label) => HOSTNAME_LABEL.test(label)) &&
+    TOP_LEVEL_LABEL.test(labels.at(-1) ?? '')
+  )
+}
+
+/** The Topic as a snake_case `[a-z0-9_]` file name prefix: diacritics dropped, other characters collapsed to `_`. */
+function slugify(topic: string): string {
+  const slug = topic
+    .normalize('NFKD')
+    .replace(/\p{Diacritic}/gu, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .slice(0, MAX_TOPIC_SLUG_LENGTH)
+    .replace(/^_+|_+$/g, '')
+
+  return slug || FALLBACK_TOPIC_SLUG
 }
