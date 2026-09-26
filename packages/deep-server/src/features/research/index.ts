@@ -1,17 +1,17 @@
 import { z } from 'zod'
-import { HumanMessage } from '@langchain/core/messages'
+import { HumanMessage, SystemMessage } from '@langchain/core/messages'
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { runAgent } from '../../infrastructure/agent/client.ts'
 import { chatModel } from '../../infrastructure/agent/model.ts'
-import { webSearchTool } from '../../infrastructure/agent/providers/anthropic.ts'
+import { webSearchTool, webToolsFor } from '../../infrastructure/agent/providers/anthropic.ts'
 import { type Script, structuredResponse } from '../../infrastructure/agent/scripted-chat-model.ts'
 import type { Model } from '../../infrastructure/agent/types.ts'
 import { defined } from '../../infrastructure/utils/utils.ts'
 import { appSkill, researchDirectory } from './paths.ts'
 
 export type ResearchEvent =
-  | { type: 'step'; step: 'grilling' | 'awaiting_answer' | 'source_catalogue' }
+  | { type: 'step'; step: 'grilling' | 'awaiting_answer' | 'source_catalogue' | 'retrieval' }
   | { type: 'step'; step: 'failed'; reason: string }
   | { type: 'text'; text: string }
 
@@ -37,6 +37,8 @@ type GrillingProtocol = z.infer<typeof grillingProtocol>
 
 type SourceCatalogue = z.infer<typeof sourceCatalogue>
 
+type Finding = z.infer<typeof finding>
+
 type GrillingTurn = { question: string; recommendedAnswer: string; answer?: string }
 
 /** Working file of the Grilling Step, kept until the Grilling Protocol exists. */
@@ -45,6 +47,9 @@ type GrillingTranscript = { question: string; turns: GrillingTurn[] }
 const GRILLING_TRANSCRIPT = 'grilling_transcript.json'
 const GRILLING_PROTOCOL_SUFFIX = '_grilling_protocol.md'
 const SOURCE_CATALOGUE_SUFFIX = '_source_catalogue.json'
+const FINDINGS_SUFFIX = '_findings.md'
+/** The heading of the first Finding; a Findings file without it has no entries. */
+const FIRST_FINDING = /^## F1$/m
 const MAX_TOPIC_SLUG_LENGTH = 50
 /** For a Topic with no ASCII letters or digits to keep. */
 const FALLBACK_TOPIC_SLUG = 'research'
@@ -82,23 +87,59 @@ const sourceCatalogue = z.object({
   sources: z.array(z.string()).describe('Bare hosts of the Primary Sources, e.g. "ecb.europa.eu".'),
 })
 
+const finding = z.object({
+  statement: z.string().describe('What the source states, in your own words.'),
+  url: z.string().describe('The exact URL of the page the quote is taken from.'),
+  quote: z.string().describe('The passage backing the statement, quoted verbatim from the page.'),
+})
+
+const retrieval = z.object({
+  findings: z.array(finding).describe('Every Finding you gathered, each from a host in the Source Catalogue.'),
+})
+
 const GRILLING_SYSTEM_PROMPT = `You run the Grilling Step of a Research: interview the researcher about the scope, goal and audience of their Research, following the grilling skill.
 You are given the researcher's question and the interview so far. Respond with either your next question and your recommended answer to it, or, once scope, goal and audience are settled, conclude with a Topic and the Grilling Protocol.`
 
 const SOURCE_CATALOGUE_SYSTEM_PROMPT = `You run the Source Catalogue Step of a Research: find the Primary Sources relevant to it, following the source-catalogue skill.
 You are given the Grilling Protocol of the Research. Search the web as much as you need, then respond with the bare hosts of the Primary Sources.`
 
+const RETRIEVAL_SYSTEM_PROMPT = `You run the Retrieval Step of a Research: gather raw, quoted Findings from its Primary Sources, following the retrieval skill.
+You are given the Grilling Protocol and the Source Catalogue of the Research. Search and read only the hosts in the Source Catalogue, then respond with every Finding you gathered.`
+
 const NO_PRIMARY_SOURCES = 'No Primary Source could be identified for the Research.'
+const NO_FINDINGS = 'Retrieval found no Findings on the Primary Sources of the Research.'
 const RESET_FIRST = 'The Research has ended; reset first to start a new one.'
 
 const MAX_GRILLING_QUESTIONS = 5
 
 const CONCLUDE_INSTRUCTION = `You have asked ${MAX_GRILLING_QUESTIONS} questions, the maximum. Conclude now with a Topic and the Grilling Protocol, recording every unresolved point as an open assumption.`
 
-/** Grilling asks one question, then concludes once it is answered; the Source Catalogue lists two central banks. */
+/**
+ * Grilling asks one question, then concludes once it is answered; the Source Catalogue lists two central banks, and
+ * Retrieval finds one Finding on each.
+ */
 const fakeScript: Script = (messages) => {
-  if (messages.some((message) => HumanMessage.isInstance(message) && message.text.startsWith('# Grilling Protocol'))) {
+  const system = messages.find((message) => SystemMessage.isInstance(message))?.text ?? ''
+
+  if (system.includes(SOURCE_CATALOGUE_SYSTEM_PROMPT)) {
     return structuredResponse({ sources: ['ecb.europa.eu', 'federalreserve.gov'] })
+  }
+
+  if (system.includes(RETRIEVAL_SYSTEM_PROMPT)) {
+    return structuredResponse({
+      findings: [
+        {
+          statement: 'The ECB sets three key interest rates for the euro area.',
+          url: 'https://www.ecb.europa.eu/stats/policy_and_exchange_rates/key_ecb_interest_rates/html/index.en.html',
+          quote: 'The Governing Council of the ECB sets the key interest rates for the euro area',
+        },
+        {
+          statement: 'The FOMC sets a target range for the federal funds rate.',
+          url: 'https://www.federalreserve.gov/monetarypolicy/openmarket.htm',
+          quote: 'The FOMC sets a target range for the federal funds rate',
+        },
+      ],
+    })
   }
 
   return messages.some((message) => HumanMessage.isInstance(message) && message.text.includes('\nAnswer: '))
@@ -162,7 +203,8 @@ export function createResearch({
     return undefined
   }
 
-  async function catalogueSources(topic: string, emit: Emit): Promise<void> {
+  /** Runs the Source Catalogue Step, returning whether the Research goes on. */
+  async function catalogueSources(topic: string, emit: Emit): Promise<boolean> {
     await emit({ type: 'step', step: 'source_catalogue' })
 
     const { sources } = await runAgent({
@@ -182,6 +224,41 @@ export function createResearch({
     if (!hosts.length) {
       await emit({ type: 'step', step: 'failed', reason: NO_PRIMARY_SOURCES })
     }
+
+    return hosts.length > 0
+  }
+
+  /** Runs the Retrieval Step, returning whether the Research goes on. */
+  async function retrieve(topic: string, emit: Emit): Promise<boolean> {
+    await emit({ type: 'step', step: 'retrieval' })
+
+    const { sources } = await readSourceCatalogue(topic)
+    const { findings } = await runAgent({
+      model,
+      systemPrompt: RETRIEVAL_SYSTEM_PROMPT,
+      message: [
+        await readFile(join(root, `${topic}${GRILLING_PROTOCOL_SUFFIX}`), 'utf8'),
+        renderSourceCatalogue(sources),
+      ].join('\n\n'),
+      responseFormat: retrieval,
+      tools: webToolsFor(sources),
+      skill: appSkill('retrieval'),
+    })
+
+    const valid = findings.filter(({ url }) => isOnSource(url, sources))
+
+    // A Findings file with no entries is kept: it records that the Research failed.
+    await writeFile(join(root, `${topic}${FINDINGS_SUFFIX}`), renderFindings(valid))
+
+    if (!valid.length) {
+      await emit({ type: 'step', step: 'failed', reason: NO_FINDINGS })
+    }
+
+    return valid.length > 0
+  }
+
+  async function hasFindings(topic: string): Promise<boolean> {
+    return FIRST_FINDING.test(await readFile(join(root, `${topic}${FINDINGS_SUFFIX}`), 'utf8'))
   }
 
   async function readSourceCatalogue(topic: string): Promise<SourceCatalogue> {
@@ -235,17 +312,24 @@ export function createResearch({
       }
 
       if (!names.includes(`${topic}${SOURCE_CATALOGUE_SUFFIX}`)) {
-        await catalogueSources(topic, emit)
-
-        return
-      }
-
-      // An empty Source Catalogue means Failed.
-      if (!(await readSourceCatalogue(topic)).sources.length) {
+        if (!(await catalogueSources(topic, emit))) {
+          return
+        }
+      } else if (!(await readSourceCatalogue(topic)).sources.length) {
+        // An empty Source Catalogue means Failed.
         throw new ResearchConflict(RESET_FIRST)
       }
 
-      // Until the Retrieval Step exists, the Research stops once the Source Catalogue is written.
+      if (!names.includes(`${topic}${FINDINGS_SUFFIX}`)) {
+        if (!(await retrieve(topic, emit))) {
+          return
+        }
+      } else if (!(await hasFindings(topic))) {
+        // A Findings file with no entries means Failed.
+        throw new ResearchConflict(RESET_FIRST)
+      }
+
+      // Until the Draft Step exists, the Research stops once the Findings are written.
     },
   }
 }
@@ -290,6 +374,34 @@ ${audience}
 
 ${assumptions}
 `
+}
+
+/** Whether the URL's host is one of the Sources or a subdomain of one; a malformed URL is on none. */
+function isOnSource(url: string, sources: string[]): boolean {
+  if (!URL.canParse(url)) {
+    return false
+  }
+
+  const { hostname } = new URL(url)
+
+  return sources.some((source) => hostname === source || hostname.endsWith(`.${source}`))
+}
+
+function renderSourceCatalogue(sources: string[]): string {
+  return `# Source Catalogue\n\n${sources.map((source) => `- ${source}`).join('\n')}\n`
+}
+
+/** The Findings with their IDs F1…Fn, each showing the statement, the URL and the verbatim quote. */
+function renderFindings(findings: Finding[]): string {
+  const entries = findings.map(
+    ({ statement, url, quote }, index) =>
+      `## F${index + 1}\n\n${statement}\n\nURL: ${url}\n\n${quote
+        .split('\n')
+        .map((line) => `> ${line}`)
+        .join('\n')}\n`,
+  )
+
+  return ['# Findings\n', ...(entries.length ? entries : ['None.\n'])].join('\n')
 }
 
 /**

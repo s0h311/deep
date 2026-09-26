@@ -7,13 +7,31 @@ import { createResearch, ResearchConflict, type ResearchEvent } from './index.ts
 import { type Script, scriptedChatModel, structuredResponse } from '../../infrastructure/agent/scripted-chat-model.ts'
 import { defined } from '../../infrastructure/utils/utils.ts'
 
-/** Answers the Source Catalogue agent with the given hosts, and every other agent with the Grilling script. */
-function researchModel(grilling: Script, sources: string[] = ['ecb.europa.eu']) {
-  return scriptedChatModel((messages) =>
-    messages.some((message) => SystemMessage.isInstance(message) && message.text.includes('Source Catalogue Step'))
-      ? structuredResponse({ sources })
-      : grilling(messages),
-  )
+type Finding = { statement: string; url: string; quote: string }
+
+const ecbFinding: Finding = {
+  statement: 'The ECB kept its deposit facility rate at 2.00%.',
+  url: 'https://www.ecb.europa.eu/press/pr/date/2025/html/ecb.mp250724.en.html',
+  quote: 'the interest rates on the deposit facility [...] will remain unchanged at 2.00%',
+}
+
+/**
+ * Answers the Source Catalogue agent with the given hosts, the Retrieval agent with the given Findings, and every
+ * other agent with the Grilling script.
+ */
+function researchModel(
+  grilling: Script,
+  { sources = ['ecb.europa.eu'], findings = [ecbFinding] }: { sources?: string[]; findings?: Finding[] } = {},
+) {
+  return scriptedChatModel((messages) => {
+    const system = messages.find((message) => SystemMessage.isInstance(message))?.text ?? ''
+
+    if (system.includes('Retrieval Step')) {
+      return structuredResponse({ findings })
+    }
+
+    return system.includes('Source Catalogue Step') ? structuredResponse({ sources }) : grilling(messages)
+  })
 }
 
 describe('Research', () => {
@@ -112,7 +130,7 @@ describe('Research', () => {
       expect(events.map((turn) => turn.at(-1))).toEqual([
         { type: 'step', step: 'awaiting_answer' },
         { type: 'step', step: 'awaiting_answer' },
-        { type: 'step', step: 'source_catalogue' },
+        { type: 'step', step: 'retrieval' },
       ])
       expect(await readdir(root)).toContain('central_bank_rate_setting_grilling_protocol.md')
       expect(await readdir(root)).not.toContain('grilling_transcript.json')
@@ -214,7 +232,7 @@ describe('Research', () => {
     })
 
     async function catalogue(sources: string[]): Promise<{ events: ResearchEvent[]; catalogue: unknown }> {
-      const model = researchModel(() => conclusion, sources)
+      const model = researchModel(() => conclusion, { sources })
 
       const events = await send(createResearch({ model, root }), 'How do central banks set interest rates?')
 
@@ -227,7 +245,7 @@ describe('Research', () => {
     test('once Grilling concludes, the Source Catalogue is written from the hosts the agent found', async () => {
       const { events, catalogue: written } = await catalogue(['ecb.europa.eu', 'federalreserve.gov'])
 
-      expect(events).toEqual([
+      expect(events.slice(0, 2)).toEqual([
         { type: 'step', step: 'grilling' },
         { type: 'step', step: 'source_catalogue' },
       ])
@@ -267,7 +285,7 @@ describe('Research', () => {
     })
 
     test('a message to a Failed Research is rejected as a conflict: reset first', async () => {
-      const model = researchModel(() => conclusion, [])
+      const model = researchModel(() => conclusion, { sources: [] })
       const research = createResearch({ model, root })
       await send(research, 'How do central banks set interest rates?')
 
@@ -276,8 +294,86 @@ describe('Research', () => {
       expect(error).toBeInstanceOf(ResearchConflict)
       expect(error).toHaveProperty('message', expect.stringMatching(/reset first/))
     })
+  })
 
-    test('the Research stops once a non-empty Source Catalogue is written', async () => {
+  describe('Retrieval', () => {
+    const conclusion = structuredResponse({
+      done: true,
+      topic: 'Central bank rate setting',
+      protocol: {
+        scope: 'The ECB and the Fed, 2015 to 2025',
+        goal: 'Understand how policy rates are decided',
+        audience: 'Pension fund trustees',
+        openAssumptions: [],
+      },
+    })
+
+    async function retrieve(
+      findings: Finding[],
+      sources = ['ecb.europa.eu', 'federalreserve.gov'],
+    ): Promise<{ events: ResearchEvent[]; written: string }> {
+      const model = researchModel(() => conclusion, { sources, findings })
+
+      const events = await send(createResearch({ model, root }), 'How do central banks set interest rates?')
+
+      return { events, written: await readFile(join(root, 'central_bank_rate_setting_findings.md'), 'utf8') }
+    }
+
+    const fedFinding: Finding = {
+      statement: 'The FOMC decided to maintain the target range for the federal funds rate.',
+      url: 'https://www.federalreserve.gov/newsevents/pressreleases/monetary20250730a.htm',
+      quote: 'the Committee decided to maintain the target range for the federal funds rate at 4-1/4 to 4-1/2 percent',
+    }
+
+    test('once the Source Catalogue is written, Findings are written with IDs F1…Fn, each with statement, URL and quote', async () => {
+      const { events, written } = await retrieve([ecbFinding, fedFinding])
+
+      expect(events).toEqual([
+        { type: 'step', step: 'grilling' },
+        { type: 'step', step: 'source_catalogue' },
+        { type: 'step', step: 'retrieval' },
+      ])
+      expect(written).toMatch(
+        /F1[\s\S]*deposit facility rate at 2\.00%[\s\S]*ecb\.mp250724\.en\.html[\s\S]*will remain unchanged at 2\.00%[\s\S]*F2[\s\S]*maintain the target range[\s\S]*monetary20250730a\.htm[\s\S]*4-1\/4 to 4-1\/2 percent/,
+      )
+    })
+
+    test('Findings from hosts outside the Source Catalogue are dropped; subdomains of its hosts are kept', async () => {
+      const finding = (url: string, statement: string): Finding => ({ statement, url, quote: `Quoted: ${statement}` })
+
+      const { written } = await retrieve([
+        finding('https://en.wikipedia.org/wiki/European_Central_Bank', 'From Wikipedia'),
+        finding('https://www.ecb.europa.eu/mopo/html/index.en.html', 'From an ECB subdomain'),
+        finding('https://ecb.europa.eu.example.com/rates', 'From a lookalike host'),
+        finding('https://notfederalreserve.gov/rates', 'From a host sharing a suffix'),
+        finding('federalreserve.gov rates page', 'From a malformed URL'),
+        finding('https://federalreserve.gov/monetarypolicy.htm', 'From the Fed itself'),
+      ])
+
+      expect(written).toMatch(/F1[\s\S]*From an ECB subdomain[\s\S]*F2[\s\S]*From the Fed itself/)
+      expect(written).not.toMatch(/Wikipedia|lookalike|sharing a suffix|malformed|F3/)
+    })
+
+    test('zero valid Findings end the Research as Failed, with a reason, recorded by a Findings file with no entries', async () => {
+      const { events, written } = await retrieve([
+        { ...ecbFinding, url: 'https://en.wikipedia.org/wiki/European_Central_Bank' },
+      ])
+
+      expect(events.at(-1)).toEqual({ type: 'step', step: 'failed', reason: expect.stringMatching(/Findings/) })
+      expect(written).not.toMatch(/F1/)
+    })
+
+    test('a message to a Research that Failed in Retrieval is rejected as a conflict: reset first', async () => {
+      const research = createResearch({ model: researchModel(() => conclusion, { findings: [] }), root })
+      await send(research, 'How do central banks set interest rates?')
+
+      const error = await send(research, 'How do tides work?').catch((error: unknown) => error)
+
+      expect(error).toBeInstanceOf(ResearchConflict)
+      expect(error).toHaveProperty('message', expect.stringMatching(/reset first/))
+    })
+
+    test('the Research stops once Findings are written', async () => {
       const research = createResearch({ model: researchModel(() => conclusion), root })
       await send(research, 'How do central banks set interest rates?')
 
