@@ -12,6 +12,11 @@ export type ArtifactKind =
 /** An Artifact by its name, with its kind, readable label and, for a Draft or Review, its Round. */
 export type Artifact = { name: string; kind: ArtifactKind; label: string; round?: number }
 
+/** Whether an Artifact of this kind cites Findings as `[Fn]`: Drafts and the Report. */
+export function citesFindings(kind: ArtifactKind | undefined): boolean {
+  return kind === 'draft' || kind === 'report'
+}
+
 /** A Review's verdict on its Draft, from the Review's front matter. */
 export type Verdict = 'pass' | 'fail'
 

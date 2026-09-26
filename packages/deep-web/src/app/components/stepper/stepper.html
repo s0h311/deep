@@ -2,41 +2,37 @@
   class="hidden items-center gap-2 md:flex"
   aria-label="Steps"
 >
-  @for (step of steps(); track step.label) { @let current = step.progress === 'Current' || step.progress === 'Running';
+  @for (step of steps(); track step.label) {
   <li
     class="flex items-center gap-2"
-    [attr.aria-current]="current ? 'step' : null"
+    [attr.aria-current]="step.current ? 'step' : null"
   >
     <span
       class="flex size-5 shrink-0 items-center justify-center rounded-full text-[10px]"
-      [class]="
-        step.progress === 'Done'
-          ? 'bg-accent text-white'
-          : current
-            ? 'border-2 border-accent bg-bg'
-            : 'border border-line bg-bg'
-      "
+      [class]="CIRCLE[step.progress]"
       aria-hidden="true"
     >
-      @if (step.progress === 'Done') { ✓ } @else if (step.progress === 'Running') {
+      @if (step.progress === 'Done') { ✓ } @else if (step.progress === 'Failed') { ! } @else if (step.progress ===
+      'Running') {
       <span class="size-1.5 animate-pulse rounded-full bg-accent"></span>
       }
     </span>
     <span
       class="text-xs whitespace-nowrap"
-      [class]="step.progress === 'Upcoming' ? 'text-muted' : current ? 'font-semibold' : ''"
+      [class]="step.progress === 'Upcoming' ? 'text-muted' : step.current ? 'font-semibold' : ''"
     >
       {{ step.label }}@if (step.round) {<span class="font-normal text-muted"> · {{ step.round }}</span>}
     </span>
     <span class="sr-only">{{ step.progress }}</span>
+    @if (!$last) {
+    <span
+      class="h-px w-5 shrink-0"
+      [class]="step.progress === 'Done' ? 'bg-accent' : 'bg-line'"
+      aria-hidden="true"
+    ></span>
+    }
   </li>
-  @if (!$last) {
-  <span
-    class="h-px w-5 shrink-0"
-    [class]="step.progress === 'Done' ? 'bg-accent' : 'bg-line'"
-    aria-hidden="true"
-  ></span>
-  } }
+  }
 </ol>
 <p class="flex items-center gap-2 md:hidden">
   <span
@@ -47,15 +43,7 @@
     <span
       data-dot
       class="size-1.5 rounded-full"
-      [class]="
-        step.progress === 'Done'
-          ? 'bg-accent'
-          : step.progress === 'Running'
-            ? 'animate-pulse bg-accent/50'
-            : step.progress === 'Current'
-              ? 'bg-accent/50'
-              : 'bg-line'
-      "
+      [class]="DOT[step.progress]"
     ></span>
     }
   </span>

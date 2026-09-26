@@ -15,6 +15,7 @@ import { GrillingThread } from '../../components/grilling-thread/grilling-thread
 import { Citation, MarkdownView } from '../../components/markdown-view/markdown-view'
 import { SourceCataloguePanel } from '../../components/source-catalogue-panel/source-catalogue-panel'
 import { Stepper } from '../../components/stepper/stepper'
+import { citesFindings } from '../../models/artifact'
 import { ResearchState } from '../../models/research-state'
 import { ResearchApi } from '../../services/research-api'
 
@@ -62,10 +63,11 @@ export class HomePage {
 
     return popover && findings ? (findings.get(popover.finding) ?? null) : undefined
   })
+  protected readonly citesFindings = citesFindings
   /** Where the reader was scrolled in the Artifact the Findings were opened from. */
   private returnScroll = 0
-  /** Where to scroll the reader once the Artifact gone back to is shown. */
-  private pendingScroll?: number
+  /** The Artifact gone back to and where to scroll the reader once it is shown; dropped if the user leaves it first. */
+  private pendingScroll?: { name: string; top: number }
   /**
    * Whether the page offers the message input: to start a Research, answer a Grilling question, or wait for a running
    * Step. A Failed or Completed Research rejects a message and an Interrupted one ignores it, so they get none.
@@ -92,11 +94,7 @@ export class HomePage {
         return { title: 'The Research failed', reason: state.reason, resumable: false }
       case 'interrupted':
         // The reason lives in the server's memory only, so it is gone after a restart.
-        return {
-          title: 'The Research was interrupted',
-          reason: state.reason ?? 'The Research was interrupted.',
-          resumable: true,
-        }
+        return { title: 'The Research was interrupted', reason: state.reason, resumable: true }
       default:
         return undefined
     }
@@ -111,11 +109,23 @@ export class HomePage {
     })
 
     // After render, as the Artifact gone back to is read again and only scrolls once its Markdown is in the page.
+    // Every signal is read first, so leaving that Artifact before it is shown runs this again and drops the scroll.
     afterRenderEffect(() => {
       const reader = this.reader()?.nativeElement
+      const name = this.research.opened()?.name
+      const markdown = this.research.openedMarkdown()
 
-      if (reader && this.research.openedMarkdown() !== undefined && this.pendingScroll !== undefined) {
-        reader.scrollTop = this.pendingScroll
+      if (!this.pendingScroll) {
+        return
+      }
+
+      if (!reader || name !== this.pendingScroll.name) {
+        this.pendingScroll = undefined
+        return
+      }
+
+      if (markdown !== undefined) {
+        reader.scrollTop = this.pendingScroll.top
         this.pendingScroll = undefined
       }
     })
@@ -191,7 +201,12 @@ export class HomePage {
 
   /** Goes back from the Findings to the Artifact they were opened from, scrolled where it was. */
   protected back(): void {
-    this.pendingScroll = this.returnScroll
+    const from = this.research.opened()?.from
+
+    if (from) {
+      this.pendingScroll = { name: from.name, top: this.returnScroll }
+    }
+
     this.research.back()
   }
 

@@ -463,6 +463,47 @@ describe('HomePage', () => {
       expect(thread(page).at(-1)).toContain('Q2 Which climate? Recommended answer: Central Europe.')
       expect(useRecommendation(page)?.disabled).toBe(false)
     })
+
+    it('drops an answer the Research rejected because another send was running', async () => {
+      const page = await renderPage({ state: { status: 'awaiting_answer' }, transcript: FIRST_QUESTION })
+      stubFailedSend(409)
+
+      send(page, 'Installers')
+      await settle()
+      const http = TestBed.inject(HttpTestingController)
+      http.expectOne({ method: 'GET', url: '/api/research' }).flush({ status: 'running', step: 'source_catalogue' })
+      await settle()
+      // The other send answered the question, then Grilling ended and its Grilling Protocol was written.
+      http
+        .expectOne({ method: 'GET', url: '/api/research/artifacts' })
+        .flush(['grilling_transcript.json', 'heat_pumps_grilling_protocol.md'])
+      http.expectOne({ method: 'GET', url: GRILLING_TRANSCRIPT_URL }).flush({
+        ...FIRST_QUESTION,
+        turns: [{ ...FIRST_QUESTION.turns[0], answer: 'Homeowners considering one.' }],
+      })
+      await settle()
+
+      expect(thread(page)).toContain('Homeowners considering one.')
+      expect(thread(page)).not.toContain('Installers')
+    })
+
+    it('keeps the thread when the send fails with a server error', async () => {
+      const page = await renderPage({ state: { status: 'awaiting_answer' }, transcript: FIRST_QUESTION })
+      stubFailedSend(502)
+
+      send(page, 'Installers')
+      await settle()
+      // The server that failed the send fails its reads too.
+      const http = TestBed.inject(HttpTestingController)
+      const badGateway = { status: 502, statusText: 'Bad Gateway' }
+      http.expectOne({ method: 'GET', url: '/api/research' }).flush(null, badGateway)
+      for (const read of http.match({ method: 'GET', url: GRILLING_TRANSCRIPT_URL })) {
+        read.flush(null, badGateway)
+      }
+      await settle()
+
+      expect(thread(page)).toContain('Q1 Who is the audience? Recommended answer: Homeowners considering one.')
+    })
   })
 
   describe('drawer', () => {
@@ -838,6 +879,38 @@ describe('HomePage', () => {
         expect(iconButton(page, 'All Artifacts')).not.toBeNull()
       })
 
+      it("doesn't carry the scroll position to another Artifact when the user leaves before going back finishes", async () => {
+        Element.prototype.scrollIntoView = () => {}
+        const page = await renderPage({ ...api, artifacts: [...(api.artifacts ?? []), 'heat_pumps_draft_2.md'] })
+        await open(page, 'Round 1 · Draft')
+        // jsdom doesn't lay out, so the reader is scrolled by hand.
+        Object.defineProperty(viewer(page)?.parentElement, 'scrollTop', { value: 240, writable: true })
+        await cite(page, 2)
+        button(page, 'Open in Findings →')?.click()
+        await settle()
+        await answerArtifactReads()
+
+        button(page, '← Back to Round 1 · Draft')?.click()
+        await settle()
+        iconButton(page, 'All Artifacts')?.click()
+        await settle()
+        // Leaving the Draft cancels its reads, so they are never answered.
+        TestBed.inject(HttpTestingController).match((request) => request.url.startsWith(ARTIFACT_URL))
+        const entry = [...page.querySelectorAll<HTMLButtonElement>('app-artifact-list button')].find((item) =>
+          item.textContent?.trim().startsWith('Round 2 · Draft'),
+        )
+        entry?.click()
+        await settle()
+        // The new Draft's reader, before its Markdown is read.
+        const reader = drawer(page)?.querySelector('header + div') as HTMLElement
+        Object.defineProperty(reader, 'scrollTop', { value: 0, writable: true })
+        await answerArtifactReads()
+
+        expect(readerTitle(page)).toBe('Round 2 · Draft')
+        expect(viewer(page)?.parentElement).toBe(reader)
+        expect(reader.scrollTop).toBe(0)
+      })
+
       it('show the cited Findings of the Report, and say when a Finding does not exist', async () => {
         const page = await renderPage({
           state: { status: 'completed' },
@@ -1137,7 +1210,7 @@ describe('HomePage', () => {
     it('say an Interrupted Research with no known reason was interrupted', async () => {
       const page = await renderPage({ state: { status: 'interrupted', step: 'source_catalogue' } })
 
-      expect(outcome(page)).toBe('The Research was interrupted The Research was interrupted. Resume')
+      expect(outcome(page)).toBe('The Research was interrupted Resume')
     })
 
     it.each<ResearchState>([
@@ -1302,6 +1375,9 @@ describe('HomePage', () => {
       expect(step(page, 'Source Catalogue')).toContain('Done')
       expect(step(page, 'Draft')).toContain('Upcoming')
       expect(step(page, 'Review')).toContain('Upcoming')
+      expect([...(page.querySelector('app-stepper ol')?.children ?? [])].map(({ tagName }) => tagName)).toEqual(
+        Array(5).fill('LI'),
+      )
     })
 
     it("shows Awaiting Answer as the user's turn in Grilling", async () => {
@@ -1320,12 +1396,39 @@ describe('HomePage', () => {
       expect(currentStep(page)).not.toContain('Running')
     })
 
-    it('marks no Step as current once the Research Failed', async () => {
+    it('marks the Steps up to the Review as done and the Review as Failed when every Round failed', async () => {
       const page = await renderPage({
         state: { status: 'failed', reason: 'The Draft failed Review in every Round.' },
+        artifacts: [
+          'grilling_transcript.json',
+          'heat_pumps_grilling_protocol.md',
+          SOURCE_CATALOGUE,
+          'heat_pumps_findings.md',
+          ...[1, 2, 3].flatMap((round) => [`heat_pumps_draft_${round}.md`, `heat_pumps_review_${round}.md`]),
+        ],
       })
 
-      expect(currentStep(page)).toBeUndefined()
+      for (const label of ['Grilling', 'Source Catalogue', 'Retrieval', 'Draft']) {
+        expect(step(page, label)).toContain('Done')
+      }
+      expect(step(page, 'Review')).toContain('Failed')
+      expect(step(page, 'Review')).toContain('3/3')
+      expect(page.querySelector('app-stepper p')?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+        'Review · 3/3 · Failed',
+      )
+    })
+
+    it('marks the Source Catalogue as Failed when it is empty', async () => {
+      const page = await renderPage({
+        state: { status: 'failed', reason: 'The Source Catalogue is empty.' },
+        artifacts: ['grilling_transcript.json', 'heat_pumps_grilling_protocol.md', SOURCE_CATALOGUE],
+      })
+
+      expect(step(page, 'Grilling')).toContain('Done')
+      expect(step(page, 'Source Catalogue')).toContain('Failed')
+      for (const label of ['Retrieval', 'Draft', 'Review']) {
+        expect(step(page, label)).toContain('Upcoming')
+      }
     })
 
     it('marks every Step as done once the Research is Completed', async () => {

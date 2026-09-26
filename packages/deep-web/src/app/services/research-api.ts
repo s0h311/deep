@@ -12,7 +12,7 @@ import {
   untracked,
 } from '@angular/core'
 import { firstValueFrom } from 'rxjs'
-import { Artifact, GRILLING_TRANSCRIPT, inStepOrder, ListedArtifact, Verdict } from '../models/artifact'
+import { Artifact, citesFindings, GRILLING_TRANSCRIPT, inStepOrder, ListedArtifact, Verdict } from '../models/artifact'
 import { parseFindings } from '../models/finding'
 import { GrillingTranscript } from '../models/grilling-transcript'
 import { ResearchState } from '../models/research-state'
@@ -91,9 +91,8 @@ export class ResearchApi {
   })
   /** The Findings, read while a Draft or the Report is open, as their citations show them. */
   private readonly findingsContent = httpResource.text(() => {
-    const cites = ['draft', 'report'].includes(this.opened()?.kind ?? '')
     const name = this.ordered().find(({ kind }) => kind === 'findings')?.name
-    return cites && name ? artifactUrl(name) : undefined
+    return citesFindings(this.opened()?.kind) && name ? artifactUrl(name) : undefined
   })
   /** A key for where the loaded Research stands, ignoring any reason, so a poll that finds it unchanged is no change. */
   private readonly stepKey = computed(() => {
@@ -279,8 +278,14 @@ export class ResearchApi {
       })
 
       if (!response.ok || !response.body) {
-        // A 409 means another send is running: show the state that send left instead.
         this.researchState.reload()
+
+        // A 409 means another send is running: show the Grilling Transcript that send left instead, which drops the
+        // answer shown right away. Not on other errors: the Grilling Transcript's read may fail too, emptying the thread.
+        if (response.status === 409) {
+          this.transcript.reload()
+        }
+
         return
       }
 
