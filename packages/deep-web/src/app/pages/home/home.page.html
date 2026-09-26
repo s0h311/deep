@@ -68,7 +68,7 @@
       [disabled]="research.busy()"
       (recommendationUsed)="send($event)"
     />
-    } @if (research.state().status !== 'failed') {
+    } @if (messageable()) {
     <form
       class="mt-auto flex items-end gap-2"
       (submit)="sendTyped($event)"

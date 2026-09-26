@@ -656,6 +656,17 @@ describe('HomePage', () => {
     expect(page.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(true)
   })
 
+  it.each<ResearchState>([
+    { status: 'completed' },
+    { status: 'interrupted', step: 'grilling' },
+    { status: 'interrupted', step: 'draft', round: 2, reason: 'The Draft agent failed twice.' },
+  ])('offers no message input when the Research is $status, as it would reject or ignore a message', async (state) => {
+    const page = await renderPage({ state })
+
+    expect(page.querySelector('textarea[name="message"]')).toBeNull()
+    expect(page.querySelector('button[type="submit"]')).toBeNull()
+  })
+
   describe('following a Step this page did not start', () => {
     beforeEach(() => vi.useFakeTimers({ shouldAdvanceTime: true }))
     afterEach(() => vi.useRealTimers())

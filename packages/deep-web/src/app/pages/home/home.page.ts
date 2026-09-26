@@ -1,4 +1,4 @@
-import { Component, inject, signal } from '@angular/core'
+import { Component, computed, inject, signal } from '@angular/core'
 import { ArtifactList } from '../../components/artifact-list/artifact-list'
 import { GrillingThread } from '../../components/grilling-thread/grilling-thread'
 import { MarkdownView } from '../../components/markdown-view/markdown-view'
@@ -15,6 +15,13 @@ export class HomePage {
   protected readonly message = signal('')
   /** Whether the page is asking the user to confirm a reset. */
   protected readonly confirmingReset = signal(false)
+  /**
+   * Whether the page offers the message input: to start a Research, answer a Grilling question, or wait for a running
+   * Step. A Failed or Completed Research rejects a message and an Interrupted one ignores it, so they get none.
+   */
+  protected readonly messageable = computed(() =>
+    ['none', 'awaiting_answer', 'running'].includes(this.research.state().status),
+  )
 
   protected sendTyped(event: SubmitEvent): void {
     event.preventDefault()
