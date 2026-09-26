@@ -1,0 +1,18 @@
+{
+  "threadId": "02189b82-a270-4bf2-95a0-ef770fa231b1",
+  "turns": [
+    {
+      "message": "tell me about the universe",
+      "startedAt": "2026-09-24T18:28:44.594Z",
+      "usage": {
+        "inputTokens": 0,
+        "outputTokens": 0
+      },
+      "phase": {
+        "step": "done",
+        "round": 2
+      },
+      "finishedAt": "2026-09-24T18:28:57.245Z"
+    }
+  ]
+}

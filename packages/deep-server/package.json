@@ -1,0 +1,16 @@
+{
+  "name": "@deep/server",
+  "type": "module",
+  "imports": {
+    "#*": "./*"
+  },
+  "scripts": {
+    "dev": "nitro dev",
+    "build": "nitro build",
+    "preview": "nitro preview",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "nitro": "latest"
+  }
+}

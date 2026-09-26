@@ -1,0 +1,14 @@
+.idea
+.vscode
+
+node_modules
+dist
+.data
+.nitro
+.cache
+.output
+.env
+
+.DS_Store
+
+packages/deep-web/.angular/cache
