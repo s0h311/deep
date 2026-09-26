@@ -1,4 +1,4 @@
-import type {Model, Tool} from '../types'
+import type { Model, Tool } from '../types'
 
 export const claudeHaiku45: Model = 'anthropic:claude-haiku-4-5'
 

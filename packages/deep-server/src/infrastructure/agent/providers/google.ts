@@ -1,5 +1,5 @@
-import {ChatGoogle} from '@langchain/google'
-import type {Model, Tool} from '../types'
+import { ChatGoogle } from '@langchain/google'
+import type { Model, Tool } from '../types'
 
 const GCP_LOCATION_FRANKFURT = 'europe-west3'
 

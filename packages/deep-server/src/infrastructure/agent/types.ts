@@ -1,4 +1,4 @@
-import type {CreateDeepAgentParams} from 'deepagents'
+import type { CreateDeepAgentParams } from 'deepagents'
 
 export type Model = CreateDeepAgentParams['model']
 

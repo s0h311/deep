@@ -1,5 +1,5 @@
-import {type AgentConfig, streamAgent} from '~/src/infrastructure/agent/client.ts'
-import {claudeHaiku45, webSearchTool} from '~/src/infrastructure/agent/providers/anthropic.ts'
+import { type AgentConfig, streamAgent } from '~/src/infrastructure/agent/client.ts'
+import { claudeHaiku45, webSearchTool } from '~/src/infrastructure/agent/providers/anthropic.ts'
 
 const SKILLS: string[] = ['.agents/skills/grilling']
 const RESEARCH_ROOT_DIRECTORY = '.research'

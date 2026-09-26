@@ -5,7 +5,8 @@
     "dev": "pnpm --filter ./packages/deep-server dev & pnpm --filter ./packages/deep-web start",
     "fmt": "oxfmt",
     "lint": "oxlint --fix",
-    "test": "pnpm --filter './packages/*' test"
+    "test": "pnpm --filter './packages/*' test",
+    "matrix": "node /Users/soheil/projects/matrix/src/index.ts"
   },
   "dependencies": {
     "@langchain/anthropic": "^1.5.11",
