@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 import { type BaseMessage, HumanMessage, SystemMessage } from '@langchain/core/messages'
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { ArtifactNotFound, createResearch, ResearchConflict, type ResearchEvent } from './index.ts'
@@ -25,6 +25,8 @@ const ecbDraft: Draft = {
   gaps: ['How the Fed weighs inflation expectations.'],
   followUpQuestions: ['How did the ECB rate path compare with the Fed?'],
 }
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 
 const passingReview: Review = { verdict: 'pass', offendingClaims: [] }
 
@@ -59,15 +61,19 @@ function researchModel(
     findings = [ecbFinding],
     draft = () => ecbDraft,
     review = () => passingReview,
+    calls = [],
   }: {
     sources?: string[]
     findings?: Finding[]
     draft?: (messages: BaseMessage[]) => Draft | Promise<Draft>
     review?: () => Review
+    /** Receives the messages of every model call, in order. */
+    calls?: BaseMessage[][]
   } = {},
 ) {
   return scriptedChatModel(async (messages) => {
-    const system = messages.find((message) => SystemMessage.isInstance(message))?.text ?? ''
+    calls.push(messages)
+    const system = systemText(messages)
 
     if (system.includes('Draft Step')) {
       return structuredResponse(await draft(messages))
@@ -83,6 +89,17 @@ function researchModel(
 
     return system.includes('Source Catalogue Step') ? structuredResponse({ sources }) : grilling(messages)
   })
+}
+
+function systemText(messages: BaseMessage[]): string {
+  return messages.find((message) => SystemMessage.isInstance(message))?.text ?? ''
+}
+
+function humanText(messages: BaseMessage[]): string {
+  return messages
+    .filter((message) => HumanMessage.isInstance(message))
+    .map((message) => message.text)
+    .join('\n')
 }
 
 describe('Research', () => {
@@ -188,6 +205,7 @@ describe('Research', () => {
       )
       expect(JSON.parse(await research.readArtifact('grilling_transcript.json'))).toEqual({
         question: 'How do central banks set interest rates?',
+        asOf: expect.stringMatching(ISO_DATE),
         turns: [
           { question: 'Who is the audience?', recommendedAnswer: 'Retail investors', answer: 'Pension fund trustees' },
           { question: 'Which central banks?', recommendedAnswer: 'The ECB and the Fed', answer: 'The ECB and the Fed' },
@@ -520,6 +538,18 @@ describe('Research', () => {
       },
     )
 
+    test('the Review agent sees the Grilling Protocol, with its time frame, besides the Draft and the Findings', async () => {
+      const calls: BaseMessage[][] = []
+      const model = researchModel(() => conclusion, { calls })
+
+      await send(createResearch({ model, root, now: () => new Date(2026, 8, 27) }), 'What did the ECB decide?')
+
+      const reviewing = defined(calls.find((messages) => systemText(messages).includes('Review Step')))
+      expect(humanText(reviewing)).toMatch(
+        /# Grilling Protocol[\s\S]*As of\n\n2026-09-27[\s\S]*The ECB, 2025[\s\S]*# Report[\s\S]*# Findings/,
+      )
+    })
+
     test('a message to a Completed Research is rejected as a conflict: reset first', async () => {
       const research = createResearch({ model: researchModel(() => conclusion), root })
       await send(research, 'What did the ECB decide on rates in July 2025?')
@@ -560,13 +590,6 @@ describe('Research', () => {
     /** The n-th Draft, told apart by its summary. */
     function nthDraft(n: number): Draft {
       return { ...ecbDraft, summary: `Draft ${n}: the ECB held its deposit facility rate at 2.00% [F1].` }
-    }
-
-    function humanText(messages: BaseMessage[]): string {
-      return messages
-        .filter((message) => HumanMessage.isInstance(message))
-        .map((message) => message.text)
-        .join('\n')
     }
 
     test('a failing Review leads to the next Draft, whose agent sees the previous Draft and its Review', async () => {
@@ -793,6 +816,7 @@ describe('Research', () => {
         expect(events.at(-1)).toEqual({ type: 'step', step: 'awaiting_answer' })
         expect(JSON.parse(await research.readArtifact('grilling_transcript.json'))).toEqual({
           question: 'What did the ECB decide on rates in July 2025?',
+          asOf: expect.stringMatching(ISO_DATE),
           turns: [{ question: 'Who is the audience?', recommendedAnswer: 'Retail investors' }],
         })
       })
@@ -812,6 +836,7 @@ describe('Research', () => {
       expect(await research.listArtifacts()).toEqual(['grilling_transcript.json'])
       expect(JSON.parse(await research.readArtifact('grilling_transcript.json'))).toEqual({
         question: 'How do central banks set interest rates?',
+        asOf: expect.stringMatching(ISO_DATE),
         turns: [{ question: 'Who is the audience?', recommendedAnswer: 'Retail investors' }],
       })
     })
@@ -911,6 +936,86 @@ describe('Research', () => {
         { type: 'step', step: 'awaiting_answer' },
       ])
       expect(await research.listArtifacts()).toEqual(['grilling_transcript.json'])
+    })
+  })
+
+  describe('Dates', () => {
+    const conclusion = structuredResponse({
+      done: true,
+      topic: 'ECB rates',
+      protocol: {
+        scope: 'The ECB, the last 12 months',
+        goal: 'Understand the latest rate decisions',
+        audience: 'Pension fund trustees',
+        openAssumptions: [],
+      },
+    })
+
+    test("every Step's agent is told today's date, and that the time frame counts from the As of date", async () => {
+      const calls: BaseMessage[][] = []
+      const model = researchModel(() => conclusion, { calls })
+
+      await send(createResearch({ model, root, now: () => new Date(2026, 8, 27, 10) }), 'What did the ECB decide?')
+
+      expect(calls.map(systemText)).toEqual([
+        expect.stringMatching(/Grilling Step[\s\S]*Today's date is 2026-09-27\. [^\n]*from its As of date/),
+        expect.stringMatching(/Source Catalogue Step[\s\S]*Today's date is 2026-09-27\. [^\n]*from its As of date/),
+        expect.stringMatching(/Retrieval Step[\s\S]*Today's date is 2026-09-27\. [^\n]*from its As of date/),
+        expect.stringMatching(/Draft Step[\s\S]*Today's date is 2026-09-27\. [^\n]*from its As of date/),
+        expect.stringMatching(/Review Step[\s\S]*Today's date is 2026-09-27\. [^\n]*from its As of date/),
+      ])
+    })
+
+    test('a Grilling Transcript without an As of date is dated by the day Grilling concludes', async () => {
+      await writeFile(
+        join(root, 'grilling_transcript.json'),
+        JSON.stringify({
+          question: 'What did the ECB decide?',
+          turns: [{ question: 'Who is the audience?', recommendedAnswer: 'Retail investors' }],
+        }),
+      )
+      const research = createResearch({
+        model: researchModel(() => conclusion),
+        root,
+        now: () => new Date(2026, 8, 27),
+      })
+
+      await send(research, 'Pension fund trustees')
+
+      expect(await readFile(join(root, 'ecb_rates_grilling_protocol.md'), 'utf8')).toMatch(/## As of\n\n2026-09-27\n/)
+    })
+
+    describe('when Grilling concludes the day after the Research started', () => {
+      const question = structuredResponse({ question: 'Who is the audience?', recommendedAnswer: 'Retail investors' })
+
+      async function grillOverTwoDays(calls: BaseMessage[][] = []): Promise<void> {
+        let today = new Date(2026, 8, 26, 23, 30)
+        const model = researchModel(
+          (messages) => (humanText(messages).includes('Pension fund trustees') ? conclusion : question),
+          { calls },
+        )
+        const research = createResearch({ model, root, now: () => today })
+        await send(research, 'What did the ECB decide?')
+
+        today = new Date(2026, 8, 27, 9)
+        await send(research, 'Pension fund trustees')
+      }
+
+      test('the Grilling Protocol records the date the Research started as its As of date', async () => {
+        await grillOverTwoDays()
+
+        expect(await readFile(join(root, 'ecb_rates_grilling_protocol.md'), 'utf8')).toMatch(/## As of\n\n2026-09-26\n/)
+      })
+
+      test("the Grilling agent is told the Research's As of date, besides today's date", async () => {
+        const calls: BaseMessage[][] = []
+
+        await grillOverTwoDays(calls)
+
+        const concluding = defined(calls.find((messages) => humanText(messages).includes('Pension fund trustees')))
+        expect(humanText(concluding)).toMatch(/As of: 2026-09-26/)
+        expect(systemText(concluding)).toMatch(/Today's date is 2026-09-27\./)
+      })
     })
   })
 

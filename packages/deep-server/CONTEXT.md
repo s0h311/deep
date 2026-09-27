@@ -46,12 +46,16 @@ _Avoid_: Paused, crashed
 ### Artifacts
 
 **Grilling Transcript** (GT):
-The record of the Grilling Step's interview: the question and every question, recommended answer and answer asked so far. Kept after the GP is written.
+The record of the Grilling Step's interview: the question, the As of date, and every question, recommended answer and answer asked so far. Kept after the GP is written.
 _Avoid_: Working file, chat history
 
 **Grilling Protocol** (GP):
-The record of the Grilling Step: the agreed scope, goal and audience of the Research.
+The record of the Grilling Step: the agreed scope, goal and audience of the Research, and its As of date.
 _Avoid_: Brief, requirements
+
+**As of**:
+The date the Research started, recorded in the Grilling Transcript and the GP. The Research's time frame counts from it, however much later a Step runs; agents are also told today's date.
+_Avoid_: Start date, today
 
 **Topic**:
 The short name the Grilling Step gives the Research; every Artifact from the GP on is named after it.

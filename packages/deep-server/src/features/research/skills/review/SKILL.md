@@ -16,7 +16,7 @@ Fail the Draft only if at least one Claim:
 - has no citation, or
 - cites a Finding that doesn't support it: a Finding that doesn't exist, states something else, or backs only part of the Claim (a different number, date or entity).
 
-Judge support against the Finding's statement and quote as given; don't check them against your own knowledge.
+Judge support against the Finding's statement and quote as given; don't check them against your own knowledge. Read a relative time frame in a Claim ("the last 12 months", "this year") from the Grilling Protocol's As of date, then judge its support like any other date.
 
 Never fail the Draft for:
 

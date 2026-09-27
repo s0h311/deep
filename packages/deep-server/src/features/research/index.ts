@@ -65,6 +65,8 @@ type ResearchConfig = {
   model?: Model
   /** The directory holding the Research's Artifacts. */
   root?: string
+  /** The clock: it dates a new Research's As of and tells every agent today's date. */
+  now?: () => Date
 }
 
 type GrillingProtocol = z.infer<typeof grillingProtocol>
@@ -95,8 +97,11 @@ type NextStep =
 
 type GrillingTurn = { question: string; recommendedAnswer: string; answer?: string }
 
-/** The record of the Grilling interview, kept after the Grilling Protocol is written; advancing then ignores it. */
-type GrillingTranscript = { question: string; turns: GrillingTurn[] }
+/**
+ * The record of the Grilling interview, kept after the Grilling Protocol is written; advancing then ignores it. `asOf`
+ * is the Research's As of date, as `YYYY-MM-DD`.
+ */
+type GrillingTranscript = { question: string; asOf: string; turns: GrillingTurn[] }
 
 const GRILLING_TRANSCRIPT = 'grilling_transcript.json'
 const GRILLING_PROTOCOL_SUFFIX = '_grilling_protocol.md'
@@ -189,7 +194,7 @@ const DRAFT_SYSTEM_PROMPT = `You run the Draft Step of a Research: write the Rep
 You are given the Grilling Protocol and the Findings of the Research, and from the second Round on, the previous Draft and its failing Review. Respond with the summary, key facts, Gaps and follow-up questions, citing the Finding behind every Claim inline as [Fn].`
 
 const REVIEW_SYSTEM_PROMPT = `You run the Review Step of a Research: check that every Claim in a Draft cites a Finding that supports it, following the review skill.
-You are given the Draft and the Findings of the Research. Respond with your verdict and every offending Claim.`
+You are given the Grilling Protocol, the Draft and the Findings of the Research. Respond with your verdict and every offending Claim.`
 
 const NO_PRIMARY_SOURCES = 'No Primary Source could be identified for the Research.'
 const NO_FINDINGS = 'Retrieval found no Findings on the Primary Sources of the Research.'
@@ -266,7 +271,13 @@ const fakeScript: Script = (messages) => {
 export function createResearch({
   model = chatModel(fakeScript),
   root = researchDirectory(),
+  now = () => new Date(),
 }: ResearchConfig = {}): Research {
+  /** The Step's system prompt, telling its agent today's date and that the Research's time frame counts from its As of date. */
+  function dated(systemPrompt: string): string {
+    return `${systemPrompt}\n\nToday's date is ${isoDate(now())}. The Research's time frame counts from its As of date, not from today's date; don't recompute it.`
+  }
+
   /** The content of the Artifact with the given name. */
   async function read(name: string): Promise<string> {
     return await readFile(join(root, name), 'utf8')
@@ -285,7 +296,7 @@ export function createResearch({
       (mustConclude ? grillingConclusion : grillingOutcome).parse(
         await runAgent({
           model,
-          systemPrompt: GRILLING_SYSTEM_PROMPT,
+          systemPrompt: dated(GRILLING_SYSTEM_PROMPT),
           message: [renderTranscript(transcript), ...(mustConclude ? [CONCLUDE_INSTRUCTION] : [])].join('\n\n'),
           responseFormat: mustConclude ? grillingConclusion : grillingResponse,
           skill: appSkill('grilling'),
@@ -297,7 +308,7 @@ export function createResearch({
     if ('done' in outcome) {
       const topic = slugify(outcome.topic)
 
-      await writeFile(join(root, protocolName(topic)), renderProtocol(transcript.question, outcome.protocol))
+      await writeFile(join(root, protocolName(topic)), renderProtocol(transcript, outcome.protocol))
 
       return true
     }
@@ -320,7 +331,7 @@ export function createResearch({
     const { sources } = await retried({ step: 'Source Catalogue', signal: context.signal }, () =>
       runAgent({
         model,
-        systemPrompt: SOURCE_CATALOGUE_SYSTEM_PROMPT,
+        systemPrompt: dated(SOURCE_CATALOGUE_SYSTEM_PROMPT),
         message,
         responseFormat: sourceCatalogue,
         tools: [webSearchTool],
@@ -344,7 +355,7 @@ export function createResearch({
     const { findings } = await retried({ step: 'Retrieval', signal: context.signal }, () =>
       runAgent({
         model,
-        systemPrompt: RETRIEVAL_SYSTEM_PROMPT,
+        systemPrompt: dated(RETRIEVAL_SYSTEM_PROMPT),
         message,
         responseFormat: retrieval,
         tools: webToolsFor(sources),
@@ -371,7 +382,7 @@ export function createResearch({
     const response = await retried({ step: 'Draft', signal: context.signal }, () =>
       runAgent({
         model,
-        systemPrompt: DRAFT_SYSTEM_PROMPT,
+        systemPrompt: dated(DRAFT_SYSTEM_PROMPT),
         message,
         responseFormat: draft,
         skill: appSkill('draft'),
@@ -386,11 +397,15 @@ export function createResearch({
   async function reviewDraft({ topic, round }: Round, context: StepContext): Promise<void> {
     await context.emit({ type: 'step', step: 'review', round })
 
-    const message = [await read(draftName(topic, round)), await read(findingsName(topic))].join('\n\n')
+    const message = [
+      await read(protocolName(topic)),
+      await read(draftName(topic, round)),
+      await read(findingsName(topic)),
+    ].join('\n\n')
     const response = await retried({ step: 'Review', signal: context.signal }, () =>
       runAgent({
         model,
-        systemPrompt: REVIEW_SYSTEM_PROMPT,
+        systemPrompt: dated(REVIEW_SYSTEM_PROMPT),
         message,
         responseFormat: review,
         skill: appSkill('review'),
@@ -420,11 +435,11 @@ export function createResearch({
     return (await ifExists(readdir(root))) ?? []
   }
 
-  /** The Grilling transcript, if Grilling has started. */
+  /** The Grilling transcript, if Grilling has started; one saved without an As of date is dated today. */
   async function readTranscript(): Promise<GrillingTranscript | undefined> {
     const transcript = await ifExists(read(GRILLING_TRANSCRIPT))
 
-    return transcript === undefined ? undefined : JSON.parse(transcript)
+    return transcript === undefined ? undefined : { asOf: isoDate(now()), ...JSON.parse(transcript) }
   }
 
   async function saveTranscript(transcript: GrillingTranscript): Promise<void> {
@@ -493,7 +508,7 @@ export function createResearch({
 
       switch (next.step) {
         case 'grilling': {
-          const transcript = (await readTranscript()) ?? { question: message, turns: [] }
+          const transcript = (await readTranscript()) ?? { question: message, asOf: isoDate(now()), turns: [] }
           const last = transcript.turns.at(-1)
 
           // Only an unanswered question takes the message; otherwise Grilling was Interrupted and the message is ignored.
@@ -838,25 +853,32 @@ function bulletList(items: string[]): string {
   return items.length ? items.map((item) => `- ${item}`).join('\n') : 'None.'
 }
 
-function renderTranscript({ question, turns }: GrillingTranscript): string {
+function renderTranscript({ question, asOf, turns }: GrillingTranscript): string {
   const interview = turns.map(
     (turn, index) =>
       `Q${index + 1}: ${turn.question}\nRecommended answer: ${turn.recommendedAnswer}\nAnswer: ${turn.answer}`,
   )
 
-  return [`Research question: ${question}`, ...interview].join('\n\n')
+  return [`Research question: ${question}\nAs of: ${asOf}`, ...interview].join('\n\n')
 }
 
 function renderQuestion({ question, recommendedAnswer }: GrillingTurn, number: number): string {
   return `❓ **Q${number}**: ${question}\n\n➡️ ${recommendedAnswer}`
 }
 
-function renderProtocol(question: string, { scope, goal, audience, openAssumptions }: GrillingProtocol): string {
+function renderProtocol(
+  { question, asOf }: GrillingTranscript,
+  { scope, goal, audience, openAssumptions }: GrillingProtocol,
+): string {
   return `# Grilling Protocol
 
 ## Question
 
 ${question}
+
+## As of
+
+${asOf}
 
 ## Scope
 
@@ -930,6 +952,13 @@ function isHostname(host: string): boolean {
     labels.every((label) => HOSTNAME_LABEL.test(label)) &&
     TOP_LEVEL_LABEL.test(labels.at(-1) ?? '')
   )
+}
+
+/** The date as `YYYY-MM-DD`, in local time. */
+function isoDate(date: Date): string {
+  return [date.getFullYear(), date.getMonth() + 1, date.getDate()]
+    .map((part) => String(part).padStart(2, '0'))
+    .join('-')
 }
 
 /** The Topic as a snake_case `[a-z0-9_]` file name prefix: diacritics dropped, other characters collapsed to `_`. */

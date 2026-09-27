@@ -80,6 +80,7 @@ Enforced by code, not prompts:
 - ≤ 3 Rounds; from Round 2 the Draft agent also sees the previous Draft + its failing Review
 - Each Step gets 2 attempts (errors, schema-invalid output), then the Research is Interrupted
 - Report structure + Sources section built from the Draft + cited Findings → Review judges content only
+- Every agent is told today's date; the Research's time frame counts from its As of date (the day it started), recorded in the Grilling Protocol
 
 ## Testing
 

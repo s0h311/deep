@@ -5,7 +5,7 @@ description: Interview the researcher about the scope, goal and audience of thei
 
 The researcher has asked a question they want researched. Before any research happens, reach a shared understanding of what the Research must deliver. Settle three things:
 
-- **Scope**: what is in and out (time frame, geography, entities, depth).
+- **Scope**: what is in and out (time frame, geography, entities, depth). State the time frame as concrete dates, counting a relative one ("the last 12 months", "recent years") back from the Research's As of date, given with the question.
 - **Goal**: what decision or understanding the Research should enable.
 - **Audience**: who will read the Report and what they already know.
 
