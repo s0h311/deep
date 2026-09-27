@@ -6,6 +6,7 @@
     "fmt": "oxfmt",
     "lint": "oxlint --fix",
     "test": "pnpm --filter './packages/*' test",
+    "eval:dev": "pnpm --filter './packages/deep-server' eval:dev",
     "matrix": "node /Users/soheil/projects/matrix/src/index.ts"
   },
   "dependencies": {
