@@ -9,6 +9,8 @@ A Draft is one attempt at the Report of a Research. Its Claims cite the Findings
 
 A Claim is any statement about a specific entity, number, date, event or quote, however well known. General mechanisms and truisms ("central banks raise rates to curb inflation") are not Claims.
 
+The Draft's title and its `As of:` line are taken from the Grilling Protocol, not written by the Draft agent. They are not Claims; don't check them.
+
 ## Verdict
 
 Fail the Draft only if at least one Claim:

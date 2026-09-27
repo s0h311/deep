@@ -69,7 +69,7 @@ type ResearchConfig = {
   now?: () => Date
 }
 
-type GrillingProtocol = z.infer<typeof grillingProtocol>
+type GrillingConclusion = z.infer<typeof grillingConclusion>
 
 type SourceCatalogue = z.infer<typeof sourceCatalogue>
 
@@ -94,6 +94,9 @@ type NextStep =
   | ({ step: 'draft' | 'review' } & Round)
   | ({ step: 'completed'; published: boolean } & Round)
   | { step: 'failed'; reason: string }
+
+/** What heads every Draft, taken from the Grilling Protocol: the readable Topic and the As of date, as `YYYY-MM-DD`. */
+type ProtocolHeader = { topic: string; asOf: string }
 
 type GrillingTurn = { question: string; recommendedAnswer: string; answer?: string }
 
@@ -306,9 +309,7 @@ export function createResearch({
     )
 
     if ('done' in outcome) {
-      const topic = slugify(outcome.topic)
-
-      await writeFile(join(root, protocolName(topic)), renderProtocol(transcript, outcome.protocol))
+      await writeFile(join(root, protocolName(slugify(outcome.topic))), renderProtocol(transcript, outcome))
 
       return true
     }
@@ -374,11 +375,12 @@ export function createResearch({
   async function writeDraft({ topic, round }: Round, context: StepContext): Promise<void> {
     await context.emit({ type: 'step', step: 'draft', round })
 
+    const protocol = await read(protocolName(topic))
     const findings = await read(findingsName(topic))
     // From Round 2, the agent revises the previous Draft against its failing Review.
     const previous =
       round > 1 ? [await read(draftName(topic, round - 1)), await read(reviewName(topic, round - 1))] : []
-    const message = [await read(protocolName(topic)), findings, ...previous].join('\n\n')
+    const message = [protocol, findings, ...previous].join('\n\n')
     const response = await retried({ step: 'Draft', signal: context.signal }, () =>
       runAgent({
         model,
@@ -390,7 +392,10 @@ export function createResearch({
       }),
     )
 
-    await writeFile(join(root, draftName(topic, round)), renderDraft(response, parseFindingUrls(findings)))
+    await writeFile(
+      join(root, draftName(topic, round)),
+      renderDraft({ ...parseProtocolHeader(protocol), ...response }, parseFindingUrls(findings)),
+    )
   }
 
   /** Runs the Review Step of the Round. */
@@ -791,9 +796,24 @@ function parseFindingUrls(findings: string): Map<string, string> {
   )
 }
 
-/** The Draft with a Sources section listing only the Findings it cites, grouped by host. */
-function renderDraft({ summary, keyFacts, gaps, followUpQuestions }: Draft, findingUrls: Map<string, string>): string {
-  return `# Report
+/** The readable Topic and the As of date of a rendered Grilling Protocol, which head every Draft. */
+function parseProtocolHeader(protocol: string): ProtocolHeader {
+  const section = (heading: string) => defined(protocol.match(new RegExp(`^## ${heading}\\n\\n(.+)$`, 'm'))?.[1])
+
+  return { topic: section('Topic'), asOf: section('As of') }
+}
+
+/**
+ * The Draft headed by the Topic and As of date from the Grilling Protocol, with a Sources section listing only the
+ * Findings it cites, grouped by host.
+ */
+function renderDraft(
+  { topic, asOf, summary, keyFacts, gaps, followUpQuestions }: ProtocolHeader & Draft,
+  findingUrls: Map<string, string>,
+): string {
+  return `# ${topic}
+
+As of: ${asOf}
 
 ## Summary
 
@@ -868,9 +888,13 @@ function renderQuestion({ question, recommendedAnswer }: GrillingTurn, number: n
 
 function renderProtocol(
   { question, asOf }: GrillingTranscript,
-  { scope, goal, audience, openAssumptions }: GrillingProtocol,
+  { topic, protocol: { scope, goal, audience, openAssumptions } }: GrillingConclusion,
 ): string {
   return `# Grilling Protocol
+
+## Topic
+
+${topic}
 
 ## Question
 

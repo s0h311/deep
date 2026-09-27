@@ -216,6 +216,18 @@ describe('Research', () => {
       )
     })
 
+    test('the Grilling Protocol records the readable Topic, not its slug, in a Topic section', async () => {
+      const model = researchModel(() =>
+        structuredResponse({ done: true, topic: 'ECB vs. Fed: rate setting (2015–2025)', protocol }),
+      )
+
+      await send(createResearch({ model, root }), 'How do central banks set interest rates?')
+
+      expect(await readFile(join(root, 'ecb_vs_fed_rate_setting_2015_2025_grilling_protocol.md'), 'utf8')).toMatch(
+        /^## Topic\n\nECB vs\. Fed: rate setting \(2015–2025\)\n$/m,
+      )
+    })
+
     describe('after 5 answered questions', () => {
       const answers = ['Retail investors', 'The ECB', '2020 to 2025', 'Policy rates only', 'A one-page summary']
       const question = structuredResponse({ question: 'What else?', recommendedAnswer: 'Nothing' })
@@ -496,6 +508,18 @@ describe('Research', () => {
       )
     })
 
+    test('the Report opens with the Topic as its title and the As of date, taken from the Grilling Protocol', async () => {
+      const model = researchModel(() =>
+        structuredResponse({ done: true, topic: 'What did the ECB decide in July 2025?', protocol }),
+      )
+
+      await send(createResearch({ model, root, now: () => new Date(2026, 8, 27) }), 'What did the ECB decide?')
+
+      expect(await readFile(join(root, 'what_did_the_ecb_decide_in_july_2025_report.md'), 'utf8')).toMatch(
+        /^# What did the ECB decide in July 2025\?\n\nAs of: 2026-09-27\n\n## Summary\n/,
+      )
+    })
+
     test('the Sources section lists only the cited Findings, grouped by host', async () => {
       const finding = (url: string): Finding => ({ statement: `Stated at ${url}`, url, quote: 'Quoted.' })
       const findings = [
@@ -546,7 +570,7 @@ describe('Research', () => {
 
       const reviewing = defined(calls.find((messages) => systemText(messages).includes('Review Step')))
       expect(humanText(reviewing)).toMatch(
-        /# Grilling Protocol[\s\S]*As of\n\n2026-09-27[\s\S]*The ECB, 2025[\s\S]*# Report[\s\S]*# Findings/,
+        /# Grilling Protocol[\s\S]*As of\n\n2026-09-27[\s\S]*The ECB, 2025[\s\S]*# ECB rates\n\nAs of: 2026-09-27[\s\S]*# Findings/,
       )
     })
 
