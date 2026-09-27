@@ -19,6 +19,10 @@ pnpm dev                     # web :4200 → server :3000
 pnpm test
 ```
 
+## Example
+
+See report [Significant strategical decisions at IKEA in last 5 years](./.archive/ikea/ikea_strategiewechsel_2019_2024_report.md)
+
 ## Architecture
 
 ```mermaid
