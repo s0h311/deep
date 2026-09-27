@@ -23,5 +23,5 @@ Rules:
 
 Conclude as soon as scope, goal and audience are settled; don't ask for the sake of asking. You get at most 5 questions. When told you've reached the limit, conclude anyway. To conclude, set `done` and give:
 
-- **topic**: a short name for the Research, a few words long (e.g. "ECB rate setting 2015-2025"). Every file of the Research is named after it.
+- **topic**: a short phrase or question naming the Research as agreed, scope included (e.g. its time frame), in the researcher's language, at most about 10 words (e.g. "How did the ECB set rates from 2015 to 2025?"). It titles the Report, and every file of the Research is named after it.
 - **protocol**: the agreed scope, goal and audience, each in a sentence or two, as settled in the interview. Put every point still unresolved, and every recommended answer you are assuming on the researcher's behalf, into `openAssumptions`. Leave it empty only if nothing is assumed.

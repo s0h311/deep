@@ -145,7 +145,12 @@ const grillingResponse = z.object({
   question: z.string().optional().describe('Your next question, while scope, goal or audience are still open.'),
   recommendedAnswer: z.string().optional().describe('Your recommended answer to the question.'),
   done: z.boolean().optional().describe('true once scope, goal and audience are settled.'),
-  topic: z.string().optional().describe('A short name for the Research, a few words long.'),
+  topic: z
+    .string()
+    .optional()
+    .describe(
+      "A short phrase or question naming the Research as agreed, scope included, in the researcher's language, at most about 10 words. It titles the Report.",
+    ),
   protocol: grillingProtocol.optional().describe('The agreed scope, goal and audience, plus any open assumptions.'),
 })
 

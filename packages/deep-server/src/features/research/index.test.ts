@@ -295,6 +295,11 @@ describe('Research', () => {
       },
       { kind: 'non-ASCII only', topic: '日本の金利', slug: 'research' },
       {
+        kind: 'question',
+        topic: 'How did the ECB set rates from 2015 to 2025?',
+        slug: 'how_did_the_ecb_set_rates_from_2015_to_2025',
+      },
+      {
         kind: 'length',
         topic: 'An extremely long Topic about the monetary policy of the European Central Bank',
         slug: 'an_extremely_long_topic_about_the_monetary_policy',
