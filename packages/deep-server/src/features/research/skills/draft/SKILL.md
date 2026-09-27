@@ -5,6 +5,14 @@ description: Write a Report from the Findings of a Research, citing the Finding 
 
 The Grilling Protocol settles the scope, goal and audience of a Research; the Findings are the raw, quoted statements gathered from its Primary Sources, numbered F1…Fn. Write the Report the audience needs, using nothing but the Findings. A Review then checks every Claim against the Finding it cites, and a Draft with an unbacked Claim fails.
 
+## A standalone research report
+
+The reader of the Report may never see the Grilling Protocol. The Report must be readable on its own: the Summary answers the Research question directly, and nothing depends on context the reader doesn't have. Don't refer to the interview or the Protocol ("as agreed", "the chosen scope"); where the scope matters, state it (e.g. the time frame or region covered).
+
+Write in the neutral, analytical register of a research report, not a chat answer: no addressing the reader, no greetings or offers of further help, no first person.
+
+The Report's title and As of date are added for you; don't restate them.
+
 ## Claims and citations
 
 A Claim is any statement about a specific entity, number, date, event or quote, however well known. Every Claim cites the Findings backing it inline, right after it: `[F3]`, or `[F1, F4]` for several.

@@ -199,7 +199,7 @@ const RETRIEVAL_SYSTEM_PROMPT = `You run the Retrieval Step of a Research: gathe
 You are given the Grilling Protocol and the Source Catalogue of the Research. Search and read only the hosts in the Source Catalogue, then respond with every Finding you gathered.`
 
 const DRAFT_SYSTEM_PROMPT = `You run the Draft Step of a Research: write the Report from its Findings, following the draft skill.
-You are given the Grilling Protocol and the Findings of the Research, and from the second Round on, the previous Draft and its failing Review. Respond with the summary, key facts, Gaps and follow-up questions, citing the Finding behind every Claim inline as [Fn].`
+You are given the Grilling Protocol and the Findings of the Research, and from the second Round on, the previous Draft and its failing Review. The Report must stand on its own without the Grilling Protocol, its summary answering the Research question directly, in the neutral, analytical tone of a research report, not a chat answer. Respond with the summary, key facts, Gaps and follow-up questions, citing the Finding behind every Claim inline as [Fn].`
 
 const REVIEW_SYSTEM_PROMPT = `You run the Review Step of a Research: check that every Claim in a Draft cites a Finding that supports it, following the review skill.
 You are given the Grilling Protocol, the Draft and the Findings of the Research. Respond with your verdict and every offending Claim.`
