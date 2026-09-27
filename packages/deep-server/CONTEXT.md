@@ -50,7 +50,7 @@ The record of the Grilling Step's interview: the question, the As of date, and e
 _Avoid_: Working file, chat history
 
 **Grilling Protocol** (GP):
-The record of the Grilling Step: the agreed scope, goal and audience of the Research, and its As of date.
+The record of the Grilling Step: the Topic, the agreed scope, goal and audience of the Research, and its As of date.
 _Avoid_: Brief, requirements
 
 **As of**:
@@ -58,7 +58,7 @@ The date the Research started, recorded in the Grilling Transcript and the GP. T
 _Avoid_: Start date, today
 
 **Topic**:
-The short name the Grilling Step gives the Research; every Artifact from the GP on is named after it.
+The short phrase or question the Grilling Step gives the Research to name what was agreed. It titles the Report, and every Artifact from the GP on is named after it.
 _Avoid_: Title, subject
 
 **Source Catalogue** (SC):
@@ -78,7 +78,7 @@ One raw, quoted statement gathered from a Source in the Source Catalogue during 
 _Avoid_: Note, fact, research data
 
 **Report**:
-The deliverable of a Research: summary, key facts, Gaps, suggested follow-up questions and Sources. Only a Draft that passed Review becomes the Report.
+The deliverable of a Research, readable on its own without the GP: its Topic and As of date, then summary, key facts, Gaps, suggested follow-up questions and Sources. Only a Draft that passed Review becomes the Report.
 _Avoid_: Result, answer
 
 **Draft**:

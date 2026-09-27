@@ -1,7 +1,7 @@
 import { evalite } from 'evalite'
 import { Levenshtein } from 'autoevals'
 
-evalite('My Eval', {
+evalite('Research', {
   // An array of test data
   // - TODO: Replace with your test data
   data: [{ input: 'Hello', expected: 'Hello World!' }],
