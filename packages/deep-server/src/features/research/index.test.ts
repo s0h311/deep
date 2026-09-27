@@ -228,6 +228,30 @@ describe('Research', () => {
       )
     })
 
+    test('a blank Topic is rejected: Grilling is Interrupted and no Grilling Protocol is written', async () => {
+      const model = researchModel(() => structuredResponse({ done: true, topic: '   ', protocol }))
+      const research = createResearch({ model, root })
+
+      const events = await send(research, 'How do central banks set interest rates?')
+
+      expect(events.at(-1)).toEqual({ type: 'step', step: 'failed', reason: expect.stringMatching(/Grilling/) })
+      expect(await research.state()).toEqual({ status: 'interrupted', step: 'grilling', reason: expect.any(String) })
+      expect((await readdir(root)).filter((name) => name.endsWith('_grilling_protocol.md'))).toEqual([])
+    })
+
+    test('a multi-line Topic is written on one line, and titles the Report whole', async () => {
+      const model = researchModel(() => structuredResponse({ done: true, topic: 'ECB rates\n2015–2025', protocol }))
+
+      await send(createResearch({ model, root }), 'How do central banks set interest rates?')
+
+      expect(await readFile(join(root, 'ecb_rates_2015_2025_grilling_protocol.md'), 'utf8')).toMatch(
+        /^## Topic\n\nECB rates 2015–2025\n$/m,
+      )
+      expect(await readFile(join(root, 'ecb_rates_2015_2025_report.md'), 'utf8')).toMatch(
+        /^# ECB rates 2015–2025\n\nAs of: /,
+      )
+    })
+
     describe('after 5 answered questions', () => {
       const answers = ['Retail investors', 'The ECB', '2020 to 2025', 'Policy rates only', 'A one-page summary']
       const question = structuredResponse({ question: 'What else?', recommendedAnswer: 'Nothing' })

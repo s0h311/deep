@@ -65,7 +65,7 @@ Failed / Completed → only a reset (`DELETE /api/research`) starts over.
 
 ### Structured outputs & Artifacts
 
-`<topic>` = short name Grilling gives the Research.
+`<topic>` = slug of the Topic, the short phrase or question Grilling gives the Research; the Topic also titles the Report.
 
 | Step             | Agent tools                                    | Structured output                                                       | Artifact                                                       |
 | ---------------- | ---------------------------------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------- |
@@ -83,7 +83,7 @@ Enforced by code, not prompts:
 - Findings from hosts outside the SC are dropped
 - ≤ 3 Rounds; from Round 2 the Draft agent also sees the previous Draft + its failing Review
 - Each Step gets 2 attempts (errors, schema-invalid output), then the Research is Interrupted
-- Report structure + Sources section built from the Draft + cited Findings → Review judges content only
+- Report built by code: Topic + As of header from the GP, body from the Draft, Sources section from the cited Findings → Review judges content only
 - Every agent is told today's date; the Research's time frame counts from its As of date (the day it started), recorded in the Grilling Protocol
 
 ## Testing

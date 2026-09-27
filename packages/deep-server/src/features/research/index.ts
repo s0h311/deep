@@ -134,9 +134,18 @@ const grillingQuestion = z.object({
   recommendedAnswer: z.string(),
 })
 
+/** A blank Topic is rejected, so the Grilling Step retries. */
+const grillingTopic = z
+  .string()
+  .trim()
+  .min(1)
+  .describe(
+    "A short phrase or question naming the Research as agreed, scope included, in the researcher's language, at most about 10 words. It titles the Report.",
+  )
+
 const grillingConclusion = z.object({
   done: z.literal(true),
-  topic: z.string(),
+  topic: grillingTopic,
   protocol: grillingProtocol,
 })
 
@@ -145,12 +154,7 @@ const grillingResponse = z.object({
   question: z.string().optional().describe('Your next question, while scope, goal or audience are still open.'),
   recommendedAnswer: z.string().optional().describe('Your recommended answer to the question.'),
   done: z.boolean().optional().describe('true once scope, goal and audience are settled.'),
-  topic: z
-    .string()
-    .optional()
-    .describe(
-      "A short phrase or question naming the Research as agreed, scope included, in the researcher's language, at most about 10 words. It titles the Report.",
-    ),
+  topic: grillingTopic.optional(),
   protocol: grillingProtocol.optional().describe('The agreed scope, goal and audience, plus any open assumptions.'),
 })
 
@@ -381,6 +385,8 @@ export function createResearch({
     await context.emit({ type: 'step', step: 'draft', round })
 
     const protocol = await read(protocolName(topic))
+    // Parsed before the agent runs, so a malformed Grilling Protocol fails without a model call.
+    const header = parseProtocolHeader(protocol)
     const findings = await read(findingsName(topic))
     // From Round 2, the agent revises the previous Draft against its failing Review.
     const previous =
@@ -399,7 +405,7 @@ export function createResearch({
 
     await writeFile(
       join(root, draftName(topic, round)),
-      renderDraft({ ...parseProtocolHeader(protocol), ...response }, parseFindingUrls(findings)),
+      renderDraft({ ...header, ...response }, parseFindingUrls(findings)),
     )
   }
 
@@ -891,6 +897,7 @@ function renderQuestion({ question, recommendedAnswer }: GrillingTurn, number: n
   return `❓ **Q${number}**: ${question}\n\n➡️ ${recommendedAnswer}`
 }
 
+/** The Grilling Protocol, its Topic on one line so that `parseProtocolHeader` reads all of it. */
 function renderProtocol(
   { question, asOf }: GrillingTranscript,
   { topic, protocol: { scope, goal, audience, openAssumptions } }: GrillingConclusion,
@@ -899,7 +906,7 @@ function renderProtocol(
 
 ## Topic
 
-${topic}
+${topic.replace(/\s+/g, ' ')}
 
 ## Question
 
